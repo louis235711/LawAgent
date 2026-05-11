@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>LawAgent - 智能法律助手</title>
+<link rel="stylesheet" href="/css/style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+</head>
+<body>
+
+<div class="sidebar-overlay" id="sidebarOverlay"></div>
+
+<aside class="sidebar" id="sidebar">
+  <div class="sidebar-header">
+    <button class="btn-new-chat" id="btnNewChat">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+      <span>新对话</span>
+    </button>
+  </div>
+  <nav class="session-list" id="sessionList"></nav>
+  <div class="sidebar-footer">
+    <div class="user-info">
+      <div class="avatar">LA</div>
+      <span>LawAgent</span>
+    </div>
+  </div>
+</aside>
+
+<main class="chat-main">
+  <header class="chat-header">
+    <button class="btn-menu" id="btnMenu">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+    </button>
+    <h1 class="chat-title" id="chatTitle">LawAgent</h1>
+    <div class="header-actions">
+      <button class="btn-icon" id="btnUpload" title="上传 PDF 文档">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+      </button>
+      <input type="file" id="fileInput" accept=".pdf" hidden>
+    </div>
+  </header>
+
+  <div class="messages-container" id="messagesContainer">
+    <div class="welcome-screen" id="welcomeScreen">
+      <div class="welcome-logo">
+        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#7c7c9a" stroke-width="1.5" stroke-linecap="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+      </div>
+      <h2>LawAgent 智能法律助手</h2>
+      <p class="welcome-sub">多智能体架构 · 法律咨询 · 案情分析 · 合同审查 · 文书撰写</p>
+      <div class="quick-actions">
+        <button class="quick-btn" data-prompt="借钱不还怎么处理？">借钱不还怎么处理？</button>
+        <button class="quick-btn" data-prompt="劳动仲裁需要什么材料？">劳动仲裁需要什么材料？</button>
+        <button class="quick-btn" data-prompt="帮我写一份借款合同">帮我写一份借款合同</button>
+        <button class="quick-btn" data-prompt="分析一下合同违约的后果">分析一下合同违约的后果</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="upload-bar" id="uploadBar" hidden>
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+    <span id="uploadFileName"></span>
+    <button class="btn-remove-doc" id="btnRemoveDoc">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+    </button>
+  </div>
+
+  <footer class="input-area">
+    <div class="input-wrapper">
+      <textarea id="messageInput" placeholder="输入法律问题，Enter 发送，Shift+Enter 换行" rows="1"></textarea>
+      <button class="btn-send" id="btnSend" title="发送 (Enter)">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+      </button>
+    </div>
+    <p class="input-hint">LawAgent 可能产生不准确信息，法律建议请咨询持证律师。</p>
+  </footer>
+</main>
+
+<div class="toast" id="toast" hidden></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="/js/app.js"></script>
+</body>
+</html>
