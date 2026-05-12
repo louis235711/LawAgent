@@ -73,7 +73,7 @@ function updateSessionTitle(id, firstMsg) {
   }
 }
 
-function deleteSession(id) {
+async function deleteSession(id) {
   state.sessions = state.sessions.filter(s => s.id !== id);
   saveSessions();
   if (state.activeId === id) {
@@ -82,6 +82,12 @@ function deleteSession(id) {
     state.uploadedDoc = null;
     renderSessions();
     showWelcome();
+  }
+  // 同步删除服务端 Redis + PostgreSQL
+  try {
+    await fetch(`/api/session/${id}`, { method: 'DELETE' });
+  } catch (e) {
+    console.warn('删除服务端会话失败:', e);
   }
 }
 
@@ -120,6 +126,8 @@ async function switchSession(id) {
   state.activeId = id;
   state.messages = [];
   state.uploadedDoc = null;
+  dom.input.value = '';
+  dom.input.style.height = 'auto';
 
   // Load messages from API
   try {
@@ -130,6 +138,7 @@ async function switchSession(id) {
         role: m.role === 'ai' ? 'ai' : 'user',
         content: m.content,
         message_type: m.message_type,
+        references: m.references || [],
       }));
       if (data.has_document) {
         state.uploadedDoc = { name: data.document_name || '已上传文档' };
@@ -185,6 +194,20 @@ function createMessageElement(m, isLast) {
     bubble.appendChild(actions);
   }
 
+  // References box (above AI message, aligned with bubble)
+  if (m.role === 'ai' && m.references && m.references.length > 0) {
+    const refsRow = document.createElement('div');
+    refsRow.className = 'refs-row';
+    const refsSpacer = document.createElement('div');
+    refsSpacer.className = 'refs-spacer';
+    const refsContent = document.createElement('div');
+    refsContent.className = 'refs-content';
+    refsContent.appendChild(createRefsBox(m.references));
+    refsRow.appendChild(refsSpacer);
+    refsRow.appendChild(refsContent);
+    wrapper.appendChild(refsRow);
+  }
+
   row.appendChild(avatar);
   row.appendChild(bubble);
   wrapper.appendChild(row);
@@ -206,6 +229,109 @@ function createMessageElement(m, isLast) {
   });
 
   return wrapper;
+}
+
+// ─── References box ────────────────────────────────────
+function createRefsBox(refs) {
+  const laws = refs.filter(r => r.type === 'law');
+  const cases = refs.filter(r => r.type === 'case');
+  const docChunks = refs.filter(r => r.type === 'doc_chunk');
+
+  const box = document.createElement('div');
+  box.className = 'refs-box';
+
+  const header = document.createElement('div');
+  header.className = 'refs-header';
+  header.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>`;
+  header.innerHTML += ` <span class="refs-title">参考资料</span>`;
+  header.innerHTML += `<span class="refs-arrow">▼</span>`;
+
+  const body = document.createElement('div');
+  body.className = 'refs-body';
+
+  if (laws.length > 0) {
+    const group = document.createElement('div');
+    group.className = 'refs-group';
+    group.innerHTML = '<div class="refs-group-title">法条引用</div>';
+    laws.forEach(r => {
+      const item = document.createElement('div');
+      item.className = 'refs-item refs-item-law';
+      let rawName = r.law_name || '';
+      const isFilename = /^[a-z0-9_ ]+$/i.test(rawName);
+      let chapter = (r.chapter || '').replace(/^#+\s*/, '').trim();
+      let article = (r.article_number || '').trim();
+      let displayName = '';
+      if (isFilename && chapter) {
+        displayName = chapter;
+      } else {
+        let name = rawName.replace(/_/g, ' ').replace(/\bsample\b/gi, '').trim();
+        if (chapter && chapter !== name) name += ' · ' + chapter;
+        displayName = name || (r.text || '').slice(0, 40);
+      }
+      if (article && !displayName.includes(article)) {
+        displayName += ' · ' + article;
+      }
+      item.textContent = displayName;
+      item.title = displayName;
+      group.appendChild(item);
+    });
+    body.appendChild(group);
+  }
+
+  if (cases.length > 0) {
+    const group = document.createElement('div');
+    group.className = 'refs-group';
+    group.innerHTML = '<div class="refs-group-title">类案参考</div>';
+    cases.forEach((r, i) => {
+      const item = document.createElement('div');
+      item.className = 'refs-item refs-item-case';
+      const titleEl = document.createElement('div');
+      titleEl.className = 'refs-case-title';
+      titleEl.textContent = `${i + 1}. ${r.title || '案例'}`;
+      titleEl.title = r.title || '';
+      item.appendChild(titleEl);
+      if (r.url) {
+        const urlEl = document.createElement('a');
+        urlEl.className = 'refs-case-url';
+        urlEl.href = r.url;
+        urlEl.target = '_blank';
+        urlEl.rel = 'noopener';
+        urlEl.textContent = r.url;
+        urlEl.title = r.url;
+        item.appendChild(urlEl);
+      }
+      group.appendChild(item);
+    });
+    body.appendChild(group);
+  }
+
+  if (docChunks.length > 0) {
+    const group = document.createElement('div');
+    group.className = 'refs-group';
+    group.innerHTML = '<div class="refs-group-title">文档片段</div>';
+    docChunks.forEach((r, i) => {
+      const item = document.createElement('div');
+      item.className = 'refs-item refs-item-law';
+      const label = r.document_name
+        ? `${r.document_name} · 片段 ${(r.chunk_index || 0) + 1}`
+        : `片段 ${i + 1}`;
+      item.textContent = label + ': ' + ((r.text || '').slice(0, 80));
+      item.title = r.text || '';
+      group.appendChild(item);
+    });
+    body.appendChild(group);
+  }
+
+  let collapsed = false;
+  header.addEventListener('click', () => {
+    collapsed = !collapsed;
+    body.style.display = collapsed ? 'none' : 'block';
+    header.querySelector('.refs-arrow').textContent = collapsed ? '▶' : '▼';
+  });
+
+  box.appendChild(header);
+  box.appendChild(body);
+  return box;
 }
 
 // ─── Streaming message element ────────────────────────
@@ -309,15 +435,44 @@ async function sendMessage(message) {
           if (data.error) {
             throw new Error(data.message || 'Stream error');
           }
+          if (data.status === 'summarizing') {
+            streamBubble.innerHTML = '<div style="font-size:13px;color:#b0b0c0;padding:4px 0">📝 摘要中...</div>';
+            continue;
+          }
+          if (data.refs && data.refs.length > 0) {
+            const refsBox = createRefsBox(data.refs);
+            const placeholder = document.createElement('div');
+            placeholder.className = 'refs-row';
+            placeholder.id = 'streamingRefs';
+            const spacer = document.createElement('div');
+            spacer.className = 'refs-spacer';
+            const content = document.createElement('div');
+            content.className = 'refs-content';
+            content.appendChild(refsBox);
+            placeholder.appendChild(spacer);
+            placeholder.appendChild(content);
+            dom.messages.insertBefore(placeholder, streamRow);
+            scrollToBottom();
+            continue;
+          }
           if (data.done) {
             finalMeta = data;
+            // If content delivered directly (blocked messages, etc.)
+            if (data.content && !fullContent) {
+              fullContent = data.content;
+              streamBubble.innerHTML = marked.parse(fullContent);
+            }
           } else if (data.delta) {
             fullContent += data.delta;
             streamBubble.innerHTML = marked.parse(fullContent);
-            // Re-highlight code blocks
             streamBubble.querySelectorAll('pre code').forEach(block => {
               hljs.highlightElement(block);
             });
+            scrollToBottom();
+          } else if (data.content) {
+            // Direct content without delta chunks
+            fullContent = data.content;
+            streamBubble.innerHTML = marked.parse(fullContent);
             scrollToBottom();
           }
         } catch (e) {
@@ -335,15 +490,24 @@ async function sendMessage(message) {
     dom.input.focus();
   }
 
+  // Fallback for empty response (model refused / content filtered)
+  if (!fullContent) {
+    fullContent = '抱歉，模型暂时无法回答，请换个方式提问。';
+  }
+
   // Replace streaming bubble with final rendered message
   const aiMsg = {
     role: 'ai',
     content: fullContent,
     metadata: finalMeta?.metadata || { message_type: '咨询' },
+    references: finalMeta?.references || [],
   };
   state.messages.push(aiMsg);
   const finalEl = createMessageElement(aiMsg, true);
   streamRow.replaceWith(finalEl);
+  // Remove streaming refs placeholder — finalEl already has its own refs box
+  const streamingRefs = document.getElementById('streamingRefs');
+  if (streamingRefs) streamingRefs.remove();
 
   // Update session
   addSession(state.activeId, null); // refresh time
@@ -464,8 +628,7 @@ function showWelcome() {
   dom.welcome.style.display = 'flex';
   dom.title.textContent = 'LawAgent';
   updateUploadBar();
-  // Remove existing message rows
-  dom.messages.querySelectorAll('.message-row').forEach(el => el.remove());
+  dom.messages.querySelectorAll('.msg-wrapper, .message-row, .pipeline-footer').forEach(el => el.remove());
 }
 
 // ─── Event Listeners ──────────────────────────────────
@@ -491,6 +654,8 @@ $('#btnNewChat').addEventListener('click', () => {
   state.activeId = null;
   state.messages = [];
   state.uploadedDoc = null;
+  dom.input.value = '';
+  dom.input.style.height = 'auto';
   renderSessions();
   showWelcome();
 });
@@ -537,11 +702,40 @@ document.addEventListener('keydown', (e) => {
   }
   if (e.key === 'Escape') {
     dom.input.value = '';
+    dom.input.style.height = 'auto';
     dom.input.focus();
   }
 });
 
+// ─── Dark Mode ─────────────────────────────────────────
+const HL_LIGHT = 'https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css';
+const HL_DARK  = 'https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css';
+
+function getTheme() {
+  return localStorage.getItem('lawagent_theme') || 'light';
+}
+
+function applyTheme(theme) {
+  document.documentElement.setAttribute('data-theme', theme);
+  $('#hl-theme').href = theme === 'dark' ? HL_DARK : HL_LIGHT;
+  const icon = $('#iconTheme');
+  if (icon) {
+    icon.innerHTML = theme === 'dark'
+      ? '<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>'
+      : '<circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/>';
+  }
+}
+
+function toggleTheme() {
+  const next = getTheme() === 'dark' ? 'light' : 'dark';
+  localStorage.setItem('lawagent_theme', next);
+  applyTheme(next);
+}
+
+$('#btnTheme').addEventListener('click', toggleTheme);
+
 // ─── Init ─────────────────────────────────────────────
+applyTheme(getTheme());
 loadSessions();
 renderSessions();
 

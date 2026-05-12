@@ -25,7 +25,7 @@ def _normalize_role(role: str) -> str:
 
 async def chat_completion(
     messages: list[dict],
-    model: str = "deepseek-chat",
+    model: str = "deepseek-v4-flash",
     temperature: float = 0.7,
     max_tokens: int = 4096,
     stream: bool = False,
@@ -82,7 +82,7 @@ async def chat_completion(
 
 async def chat_completion_stream(
     messages: list[dict],
-    model: str = "deepseek-chat",
+    model: str = "deepseek-v4-flash",
     temperature: float = 0.7,
     max_tokens: int = 4096,
     max_retries: int = 3,

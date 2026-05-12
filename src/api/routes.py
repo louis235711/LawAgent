@@ -59,10 +59,19 @@ async def new_session():
 @router.post("/chat/{session_id}", response_model=ChatResponse)
 async def chat(session_id: str, req: ChatRequest):
     user_input = req.message
+    logger.info(f"[SECURITY] checking: {user_input[:80]}...")
+    logger.info(f"[ROUTE] session={session_id} input_len={len(user_input)}")
 
     # Security check
-    result, _ = await check_safety(user_input)
+    try:
+        result, _ = await check_safety(user_input)
+    except Exception:
+        logger.warning("Safety check failed, defaulting to allow")
+        result = "合法"
+    logger.info(f"[SECURITY] result={result}")
+
     if result != "合法":
+        logger.info(f"[ROUTE] blocked: {result}")
         block_msg = get_block_response(result)
         return ChatResponse(
             session_id=session_id,
@@ -77,6 +86,11 @@ async def chat(session_id: str, req: ChatRequest):
         logger.error(f"Dispatch error: {e}")
         raise HTTPException(status_code=500, detail="处理请求时出现内部错误")
 
+    logger.info(
+        f"[ROUTE] done agent={response.metadata.get('agent', '?')} "
+        f"intent={response.metadata.get('intent', '?')} "
+        f"refs={len(response.references)} content_len={len(response.content)}"
+    )
     return ChatResponse(
         session_id=session_id,
         content=response.content,
@@ -88,19 +102,33 @@ async def chat(session_id: str, req: ChatRequest):
 @router.post("/chat/{session_id}/stream")
 async def chat_stream(session_id: str, req: ChatRequest):
     user_input = req.message
+    logger.info(f"[SECURITY] checking: {user_input[:80]}...")
+    logger.info(f"[ROUTE] session={session_id} input_len={len(user_input)} stream=true")
 
     # Security check
-    result, _ = await check_safety(user_input)
+    try:
+        result, _ = await check_safety(user_input)
+    except Exception:
+        logger.warning("Safety check failed, defaulting to allow")
+        result = "合法"
+    logger.info(f"[SECURITY] result={result}")
+
     if result != "合法":
+        logger.info(f"[ROUTE] blocked: {result}")
         block_msg = get_block_response(result)
-        block_json = json.dumps(
-            {"session_id": session_id, "content": block_msg, "metadata": {"blocked": True, "reason": result}},
-            ensure_ascii=False,
-        )
-        return StreamingResponse(
-            iter([f"data: {block_json}\n\n"]),
-            media_type="text/event-stream",
-        )
+
+        async def blocked_stream():
+            yield f"data: {json.dumps({'delta': block_msg}, ensure_ascii=False)}\n\n"
+            done = json.dumps({
+                "done": True,
+                "session_id": session_id,
+                "content": block_msg,
+                "references": [],
+                "metadata": {"blocked": True, "reason": result},
+            }, ensure_ascii=False)
+            yield f"data: {done}\n\n"
+
+        return StreamingResponse(blocked_stream(), media_type="text/event-stream")
 
     async def generate():
         try:
@@ -113,6 +141,9 @@ async def chat_stream(session_id: str, req: ChatRequest):
                         "metadata": item.metadata,
                     }, ensure_ascii=False)
                     yield f"data: {done_data}\n\n"
+                elif isinstance(item, dict):
+                    # status event (e.g. "summarizing") or refs event
+                    yield f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
                 else:
                     chunk_data = json.dumps({"delta": item}, ensure_ascii=False)
                     yield f"data: {chunk_data}\n\n"
@@ -169,4 +200,21 @@ async def remove_session(session_id: str):
         put_conn(conn)
     except Exception:
         pass
+
+    # Clean up Milvus session document vectors
+    try:
+        from src.vector_db.milvus_client import get_collection, SESSION_DOCUMENTS_COLLECTION
+        coll = get_collection(SESSION_DOCUMENTS_COLLECTION)
+        coll.delete(f'session_id == "{session_id}"')
+    except Exception:
+        pass
+
+    # Clean up uploaded files on disk
+    import shutil
+    import os
+    from src.config import settings
+    upload_dir = os.path.join(settings.uploads_dir, session_id)
+    if os.path.isdir(upload_dir):
+        shutil.rmtree(upload_dir)
+
     return {"status": "deleted", "session_id": session_id}

@@ -16,7 +16,7 @@ LEGAL_KNOWLEDGE_COLLECTION = "legal_knowledge"
 SESSION_DOCUMENTS_COLLECTION = "session_documents"
 
 _INDEX_PARAMS = {
-    "metric_type": "IP",
+    "metric_type": "COSINE",
     "index_type": "IVF_FLAT",
     "params": {"nlist": 128},
 }

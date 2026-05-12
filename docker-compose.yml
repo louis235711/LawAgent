@@ -84,7 +84,19 @@ services:
       timeout: 20s
       retries: 3
 
+  ocr:
+    build: ./ocr
+    container_name: law_agent_ocr
+    ports:
+      - "8001:8001"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
   app:
+    profiles: ["full"]
     build: .
     container_name: law_agent_app
     ports:
@@ -110,9 +122,10 @@ services:
       REDIS_DB: "0"
       MILVUS_HOST: milvus
       MILVUS_PORT: "19530"
+      OCR_SERVICE_URL: http://ocr:8001
       MAX_CONTEXT_TOKENS: "200000"
-      SUMMARY_TRIGGER_RATIO: "0.65"
-      SUMMARY_ROUNDS: "5"
+      SUMMARY_TRIGGER_RATIO: "0.70"
+      MIN_BATCH_TOKENS: "40000"
       APP_HOST: "0.0.0.0"
       APP_PORT: "8000"
     depends_on:
@@ -121,6 +134,8 @@ services:
       redis:
         condition: service_healthy
       milvus:
+        condition: service_healthy
+      ocr:
         condition: service_healthy
     volumes:
       - upload_data:/app/data/uploads

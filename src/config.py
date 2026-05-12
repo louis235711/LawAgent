@@ -44,8 +44,11 @@ class Settings(BaseSettings):
 
     # Context window
     max_context_tokens: int = 200_000
-    summary_trigger_ratio: float = 0.65
-    summary_rounds: int = 5
+    summary_trigger_ratio: float = 0.70
+    min_batch_tokens: int = 40_000
+
+    # OCR service (PaddleOCR Docker)
+    ocr_service_url: str = "http://localhost:8001"
 
     # App
     app_host: str = "0.0.0.0"

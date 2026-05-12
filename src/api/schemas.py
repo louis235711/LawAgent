@@ -31,6 +31,7 @@ class HistoryMessage(BaseModel):
     token_count: int
     create_time: str
     message_type: str
+    references: list[dict] = []
 
 
 class HealthResponse(BaseModel):

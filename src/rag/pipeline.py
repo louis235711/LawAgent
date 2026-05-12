@@ -5,24 +5,55 @@ from src.vector_db.milvus_client import (
     LEGAL_KNOWLEDGE_COLLECTION,
     SESSION_DOCUMENTS_COLLECTION,
 )
+from src.rag.bm25 import get_legal_bm25, build_legal_bm25
+from loguru import logger
+
+RRF_K = 60  # RRF smoothing constant
+
+
+def _truncate(text: str, max_len: int = 80) -> str:
+    t = (text or "").replace("\n", " ")
+    return t[:max_len] + ("..." if len(t) > max_len else "")
+
+
+def _rrf_fusion(
+    vector_results: list[tuple[int, float]],
+    bm25_results: list[tuple[int, float]],
+    top_k: int,
+) -> list[int]:
+    """RRF fusion of two ranked lists. Returns sorted doc indices."""
+    scores: dict[int, float] = {}
+
+    for rank, (doc_idx, _) in enumerate(vector_results):
+        scores[doc_idx] = scores.get(doc_idx, 0.0) + 1.0 / (RRF_K + rank + 1)
+
+    for rank, (doc_idx, _) in enumerate(bm25_results):
+        scores[doc_idx] = scores.get(doc_idx, 0.0) + 1.0 / (RRF_K + rank + 1)
+
+    sorted_items = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+    return [idx for idx, _ in sorted_items[:top_k]]
 
 
 async def retrieve(
     query: str,
     collection_name: str,
     top_k: int = 10,
+    output_fields: list[str] | None = None,
 ) -> list[dict]:
-    """Retrieve relevant chunks from Milvus: embed → search → rerank."""
+    """Pure vector retrieval with rerank (unchanged for session docs)."""
+    if output_fields is None:
+        output_fields = ["chunk_text"]
+
     query_vec = (await embed_texts([query]))[0]
 
     coll = get_collection(collection_name)
-    search_params = {"metric_type": "IP", "params": {"nprobe": 16}}
+    search_params = {"metric_type": "COSINE", "params": {"nprobe": 16}}
     results = coll.search(
         data=[query_vec],
         anns_field="vector",
         param=search_params,
         limit=top_k * 3,  # over-retrieve for rerank
-        output_fields=["chunk_text"],
+        output_fields=output_fields,
     )
 
     hits = results[0]
@@ -30,14 +61,14 @@ async def retrieve(
         return []
 
     documents = [hit.entity.get("chunk_text") or "" for hit in hits]
-
-    # Rerank
     reranked = await rerank(query, documents, top_k=top_k)
 
+    extra_fields = [f for f in output_fields if f != "chunk_text"]
     return [
         {
             "chunk_text": documents[r["index"]],
             "score": r["relevance_score"],
+            **{f: hits[r["index"]].entity.get(f) or "" for f in extra_fields},
         }
         for r in reranked
     ]
@@ -48,7 +79,7 @@ async def insert_chunks(
     collection_name: str,
     metadata: list[dict] | None = None,
 ):
-    """Embed chunks and insert into Milvus."""
+    """Embed chunks and insert into Milvus. Rebuilds BM25 if legal_knowledge."""
     if not chunks:
         return
 
@@ -66,8 +97,156 @@ async def insert_chunks(
     coll.flush()
 
 
-async def retrieve_legal(query: str, top_k: int = 10) -> list[dict]:
-    return await retrieve(query, LEGAL_KNOWLEDGE_COLLECTION, top_k=top_k)
+async def retrieve_legal(query: str, top_k: int = 5) -> list[dict]:
+    """Hybrid retrieval: BM25 + Cosine vector search → RRF fusion → rerank → top_k."""
+    logger.info(f"[RAG] query: {query[:100]}")
+    query_vec = (await embed_texts([query]))[0]
+
+    # 1. Vector search: over-retrieve 30
+    coll = get_collection(LEGAL_KNOWLEDGE_COLLECTION)
+    search_params = {"metric_type": "COSINE", "params": {"nprobe": 16}}
+    vec_results = coll.search(
+        data=[query_vec],
+        anns_field="vector",
+        param=search_params,
+        limit=30,
+        output_fields=["chunk_text", "law_name", "chapter", "article_number"],
+    )
+    vec_hits = vec_results[0]
+
+    if vec_hits:
+        _vec_items = [
+            f"#{hit.id}({hit.distance:.4f}):{_truncate(hit.entity.get('chunk_text',''),60)}"
+            for hit in vec_hits[:15]
+        ]
+        logger.debug(f"[RAG:VEC] top{len(vec_hits)}:\n  " + "\n  ".join(_vec_items))
+    else:
+        logger.debug(f"[RAG:VEC] no results")
+
+    # 2. BM25 search: over-retrieve 30
+    bm25 = get_legal_bm25()
+    bm25_results = bm25.search(query, top_k=30)
+
+    if bm25_results:
+        _bm25_items = [
+            f"idx={idx}({score:.4f}):{_truncate(bm25.documents[idx] if idx < len(bm25.documents) else '',60)}"
+            for idx, score in bm25_results[:15]
+        ]
+        logger.debug(f"[RAG:BM25] top{len(bm25_results)}:\n  " + "\n  ".join(_bm25_items))
+    else:
+        logger.debug(f"[RAG:BM25] no results (built={bm25._built})")
+
+    # 3. RRF fusion → top 30 candidates
+    vec_indices = [(hit.id, hit.distance) for hit in vec_hits]
+    fused_indices = _rrf_fusion(vec_indices, bm25_results, top_k=30)
+
+    _fused_items = [
+        f"idx={i}(src={'vec' if i in {h.id for h in vec_hits} else 'bm25'})"
+        for i in fused_indices[:15]
+    ]
+    logger.debug(f"[RAG:RRF] fused top{len(fused_indices)}: {', '.join(_fused_items)}")
+
+    # 4. Build document list from fused indices (deduplicate by text)
+    id_to_hit = {hit.id: hit for hit in vec_hits}
+    bm25_docs: dict[int, str] = {}
+    for doc_idx, _ in bm25_results:
+        if doc_idx < len(bm25.documents):
+            bm25_docs[doc_idx] = bm25.documents[doc_idx]
+
+    documents = []
+    doc_sources = []  # Milvus hit or BM25 metadata dict
+    seen: set[str] = set()
+    for idx in fused_indices:
+        hit = id_to_hit.get(idx)
+        if hit:
+            text = hit.entity.get("chunk_text") or ""
+            if text and text not in seen:
+                seen.add(text)
+                documents.append(text)
+                doc_sources.append(hit)
+        elif idx in bm25_docs:
+            text = bm25_docs[idx]
+            if text and text not in seen:
+                seen.add(text)
+                documents.append(text)
+                doc_sources.append(bm25.get_meta(idx))
+
+    logger.debug(f"[RAG:RRF] after dedup: {len(documents)} unique docs (was {len(fused_indices)})")
+
+    if not documents:
+        logger.warning(f"[RAG] no documents after fusion")
+        return []
+
+    # 5. Rerank unique documents → final top_k, then filter by relevance threshold
+    reranked = await rerank(query, documents, top_k=top_k)
+
+    # Filter out low-relevance results
+    reranked = [r for r in reranked if r["relevance_score"] >= 0.4]
+    logger.debug(f"[RAG:RERANK] after score filter (>=0.4): {len(reranked)} results")
+
+    _rerank_items = [
+        f"idx={r['index']}({r['relevance_score']:.4f}):{_truncate(documents[r['index']], 60)}"
+        for r in reranked
+    ]
+    logger.info(f"[RAG:RERANK] final top{len(reranked)}:\n  " + "\n  ".join(_rerank_items))
+
+    results = []
+    for r in reranked:
+        idx = r["index"]
+        source = doc_sources[idx]
+        # source can be a Milvus hit or a BM25 metadata dict
+        if hasattr(source, "entity"):
+            results.append({
+                "chunk_text": documents[idx],
+                "score": r["relevance_score"],
+                "law_name": source.entity.get("law_name") or "",
+                "chapter": source.entity.get("chapter") or "",
+                "article_number": source.entity.get("article_number") or "",
+            })
+        else:
+            meta = source or {}
+            results.append({
+                "chunk_text": documents[idx],
+                "score": r["relevance_score"],
+                "law_name": meta.get("law_name", ""),
+                "chapter": meta.get("chapter", ""),
+                "article_number": meta.get("article_number", ""),
+            })
+
+    logger.info(f"[RAG] done: {len(results)} results, top_score={results[0]['score']:.4f}" if results else "[RAG] done: 0 results")
+    return results
+
+
+async def build_bm25_from_collection():
+    """Build/Rebuild BM25 index from all legal_knowledge chunks."""
+    coll = get_collection(LEGAL_KNOWLEDGE_COLLECTION)
+    # Query all chunks in batches (Milvus limit: 16384)
+    all_chunks = []
+    all_meta = []
+    offset = 0
+    batch = 2000
+    while True:
+        results = coll.query(
+            expr="id >= 0",
+            output_fields=["chunk_text", "law_name", "chapter", "article_number"],
+            limit=batch,
+            offset=offset,
+        )
+        if not results:
+            break
+        for h in results:
+            all_chunks.append(h.get("chunk_text") or "")
+            all_meta.append({
+                "law_name": h.get("law_name") or "",
+                "chapter": h.get("chapter") or "",
+                "article_number": h.get("article_number") or "",
+            })
+        if len(results) < batch:
+            break
+        offset += batch
+
+    build_legal_bm25(all_chunks, all_meta)
+    return len(all_chunks)
 
 
 async def retrieve_session_docs(
@@ -75,11 +254,13 @@ async def retrieve_session_docs(
     session_id: str | None = None,
     top_k: int = 10,
 ) -> list[dict]:
+    """Vector retrieval for session documents."""
+    logger.info(f"[RAG:DOC] query: {query[:100]} session={session_id}")
     coll = get_collection(SESSION_DOCUMENTS_COLLECTION)
 
     query_vec = (await embed_texts([query]))[0]
 
-    search_params = {"metric_type": "IP", "params": {"nprobe": 16}}
+    search_params = {"metric_type": "COSINE", "params": {"nprobe": 16}}
     expr = f'session_id == "{session_id}"' if session_id else None
 
     results = coll.search(
@@ -92,11 +273,19 @@ async def retrieve_session_docs(
     )
 
     hits = results[0]
+    logger.debug(f"[RAG:DOC] vector hits: {len(hits)}")
+
     if not hits:
         return []
 
     documents = [hit.entity.get("chunk_text") or "" for hit in hits]
     reranked = await rerank(query, documents, top_k=top_k)
+
+    _rerank_items = [
+        f"idx={r['index']}({r['relevance_score']:.4f}):{_truncate(documents[r['index']], 60)}"
+        for r in reranked
+    ]
+    logger.info(f"[RAG:DOC:RERANK] top{len(reranked)}:\n  " + "\n  ".join(_rerank_items))
 
     return [
         {

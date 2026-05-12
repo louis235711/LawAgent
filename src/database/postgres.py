@@ -28,10 +28,9 @@ def init_db():
     """Run migrations on startup."""
     conn = get_conn()
     try:
-        with conn.cursor() as cur:
-            cur.execute(
-                open("migrations/001_init.sql", encoding="utf-8").read()
-            )
+        for migration in ("migrations/001_init.sql", "migrations/002_session_memory.sql", "migrations/003_add_references.sql"):
+            with conn.cursor() as cur:
+                cur.execute(open(migration, encoding="utf-8").read())
         conn.commit()
     finally:
         put_conn(conn)

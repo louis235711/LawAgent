@@ -1,68 +1,39 @@
-"""PDF parser: tries MinerU first, falls back to pdfminer, then raw text."""
+"""PDF parser: uses PaddleOCR Docker service for structure + OCR → Markdown."""
 
-import os
-import subprocess
+import httpx
+from src.config import settings
 from loguru import logger
 
 
 async def parse_pdf(pdf_path: str) -> str:
-    """Parse PDF to Markdown. Tries MinerU → pdfminer.six → raw text."""
+    """Parse PDF to Markdown via PaddleOCR Docker service. Raises on error."""
 
-    # Strategy 1: MinerU (magic-pdf)
+    url = f"{settings.ocr_service_url}/ocr"
+    logger.info(f"Parsing PDF via OCR service: {url}")
+
     try:
-        result = await _mineru_parse(pdf_path)
-        if result and result.strip():
-            return result
+        async with httpx.AsyncClient(timeout=120) as client:
+            with open(pdf_path, "rb") as f:
+                response = await client.post(
+                    url,
+                    files={"file": (pdf_path, f, "application/pdf")},
+                )
+    except httpx.ConnectError:
+        raise RuntimeError(
+            "PaddleOCR 服务不可用，请确保 OCR Docker 容器已启动。\n"
+            f"启动命令: docker-compose up -d ocr"
+        )
     except Exception as e:
-        logger.info(f"MinerU not available: {e}")
+        raise RuntimeError(f"调用 OCR 服务失败: {e}")
 
-    # Strategy 2: pdfminer.six
-    try:
-        return _pdfminer_parse(pdf_path)
-    except Exception as e:
-        logger.info(f"pdfminer not available: {e}")
+    if response.status_code != 200:
+        raise RuntimeError(
+            f"OCR 服务返回错误 (HTTP {response.status_code}): {response.text}"
+        )
 
-    # Strategy 3: raw read
-    try:
-        return _raw_read(pdf_path)
-    except Exception:
-        raise RuntimeError(f"Unable to parse PDF: {pdf_path}")
+    data = response.json()
+    markdown = data.get("markdown", "")
+    if not markdown.strip():
+        raise RuntimeError("OCR 服务返回了空内容，文档可能为空或无法识别")
 
-
-async def _mineru_parse(pdf_path: str) -> str:
-    output_dir = os.path.dirname(pdf_path)
-    cmd = ["magic-pdf", "-p", pdf_path, "-o", output_dir]
-    proc = await _run_subprocess(cmd)
-    if proc.returncode != 0:
-        raise RuntimeError(f"MinerU failed")
-    base = os.path.splitext(os.path.basename(pdf_path))[0]
-    md_path = os.path.join(output_dir, base, f"{base}.md")
-    if os.path.exists(md_path):
-        with open(md_path, encoding="utf-8") as f:
-            return f.read()
-    raise FileNotFoundError(f"MinerU output not found: {md_path}")
-
-
-def _pdfminer_parse(pdf_path: str) -> str:
-    from pdfminer.high_level import extract_text
-    text = extract_text(pdf_path)
-    if not text.strip():
-        raise RuntimeError("pdfminer extracted empty text")
-    lines = text.split("\n")
-    return "\n".join(line.strip() for line in lines if line.strip())
-
-
-def _raw_read(pdf_path: str) -> str:
-    with open(pdf_path, "rb") as f:
-        raw = f.read()
-    text = raw.decode("utf-8", errors="ignore")
-    if not text.strip():
-        raise RuntimeError("Raw read produced empty text")
-    lines = text.split("\n")
-    return "\n".join(line for line in lines if line.strip())
-
-
-async def _run_subprocess(cmd: list[str]):
-    return await __import__("asyncio").create_subprocess_exec(
-        *cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-    )
+    return markdown

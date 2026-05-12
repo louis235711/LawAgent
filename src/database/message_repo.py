@@ -1,3 +1,4 @@
+import json
 from src.database.postgres import get_conn, put_conn
 
 
@@ -7,15 +8,23 @@ def save_message(
     content: str,
     token_count: int,
     message_type: str = "咨询",
+    references: list[dict] | None = None,
 ):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
             cur.execute(
                 """INSERT INTO conversation_messages
-                   (session_id, message_role, message_content, token_count, message_type)
-                   VALUES (%s, %s, %s, %s, %s)""",
-                (session_id, role, content, token_count, message_type),
+                   (session_id, message_role, message_content, token_count, message_type, "references")
+                   VALUES (%s, %s, %s, %s, %s, %s)""",
+                (
+                    session_id,
+                    role,
+                    content,
+                    token_count,
+                    message_type,
+                    json.dumps(references or [], ensure_ascii=False),
+                ),
             )
         conn.commit()
     finally:
@@ -27,7 +36,7 @@ def get_messages(session_id: str, limit: int = 50) -> list[dict]:
     try:
         with conn.cursor() as cur:
             cur.execute(
-                """SELECT message_role, message_content, token_count, create_time, message_type
+                """SELECT message_role, message_content, token_count, create_time, message_type, "references"
                    FROM conversation_messages
                    WHERE session_id = %s
                    ORDER BY create_time DESC
@@ -42,6 +51,7 @@ def get_messages(session_id: str, limit: int = 50) -> list[dict]:
                     "token_count": row[2],
                     "create_time": row[3].isoformat(),
                     "message_type": row[4],
+                    "references": row[5] if isinstance(row[5], list) else json.loads(row[5] or "[]"),
                 }
                 for row in reversed(rows)
             ]
