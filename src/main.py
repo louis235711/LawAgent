@@ -30,6 +30,7 @@ logger.add(
 )
 
 os.makedirs("logs", exist_ok=True)
+os.makedirs(settings.generated_dir, exist_ok=True)
 logger.add(
     "logs/lawagent_{time:YYYY-MM-DD}.log",
     format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {extra[request_id]} | {name}:{function}:{line} | {message}",
@@ -105,4 +106,4 @@ if os.path.isdir(static_dir):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("src.main:app", host=settings.app_host, port=settings.app_port, reload=True)
+    uvicorn.run("src.main:app", host=settings.app_host, port=settings.app_port)

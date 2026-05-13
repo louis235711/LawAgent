@@ -47,6 +47,7 @@
 
 - **short_term_memory**：保留最近 N 条消息的**完整原文**，用于 LLM 回顾最接近的对话上下文
 - **summary_list**：每段摘要覆盖一个批次的消息，按时间顺序排列。第 1 段最旧，最后一段最新
+- **longterm_memory：**用户的使用偏好，存在memory.md。会话关闭/对话压缩时执行，冲突更新。后面用户每次打开会话都会加载memory.md并融合系统提示词。
 
 ---
 
@@ -82,7 +83,7 @@ window_token_count >= max_context_tokens × summary_trigger_ratio
 
 ### 滑动窗口
 
-`summary_list` 最大长度 20。超过 20 段时弹出最旧的一段（FIFO）。
+`summary_list` 最大长度 10。超过 10 段时弹出最旧的一段（FIFO，被弹出的部分自动加入milvus）。再从milvus使用rag挑选10个（不超过10个就是全部）。
 
 ---
 
@@ -185,3 +186,12 @@ Redis 重启、内存淘汰等场景下，会话记忆不会丢失。
 | `src/config.py` | 上下文相关配置项 |
 | `migrations/001_init.sql` | `conversation_messages` 表 |
 | `migrations/002_session_memory.sql` | `session_memory` 表 |
+
+
+
+当前剩余问题：
+
+- 并未实际做用户登录、鉴权和管理功能
+- memory的会话记忆并未实际做rag
+- 主agent并未改为planner and executor模式，不支持多个子Agent搭建工作流
+- bm25在文档问答hits0？

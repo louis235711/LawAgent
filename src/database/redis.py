@@ -34,6 +34,7 @@ def _default_session() -> dict:
         "state": "idle",
         "has_document": False,
         "document_name": None,
+        "file_size": 0,
     }
 
 
@@ -64,6 +65,7 @@ async def get_session(session_id: str) -> dict | None:
             "state": pg_data["state"],
             "has_document": pg_data["has_document"],
             "document_name": pg_data["document_name"],
+            "file_size": 0,
         }
         await client.set(key, json.dumps(data, ensure_ascii=False))
         return data

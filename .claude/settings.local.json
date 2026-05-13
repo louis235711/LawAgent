@@ -65,7 +65,14 @@
       "Bash(taskkill //F //IM python.exe)",
       "Bash(watchfiles --version)",
       "Bash(watchfiles *)",
-      "Bash(awk '{print $2}')"
+      "Bash(awk '{print $2}')",
+      "Bash(pkill -9 -f \"uvicorn\")",
+      "Bash(pkill -9 -f \"src.main:app\")",
+      "Bash(taskkill //PID 88868 //F)",
+      "Bash(taskkill //F //PID 82272 //T)",
+      "Bash(taskkill /F /IM python3.exe)",
+      "Bash(cmd *)",
+      "Bash(disown)"
     ]
   },
   "enabledPlugins": {

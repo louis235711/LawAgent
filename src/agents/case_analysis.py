@@ -3,6 +3,7 @@ from typing import Union
 
 from src.agents.base import BaseAgent, AgentResponse
 from src.rag.pipeline import retrieve_legal
+from src.rag.query_rewriter import extract_history_from_context
 from src.tools.web_search import search_web
 from src.llm.client import chat_completion, chat_completion_stream
 from loguru import logger
@@ -15,6 +16,7 @@ CASE_ANALYSIS_PROMPT = """你是一个专业的法律案件分析师。请根据
 3. **法律依据**：引用相关法条（必须标注法条名称和条款号），不得编造
 4. **类案参考**：参考提供的类案检索结果，给出类似案例的处理方式，未检索到时如实说明
 5. **初步建议**：给出具体的法律建议或维权步骤，不确定时建议咨询持证律师
+6. 引用法条时直接写出原文内容，不要提及"片段X"、"法条X"等内部编号
 
 ## 相关法条
 {law_references}
@@ -41,8 +43,9 @@ class CaseAnalysisAgent(BaseAgent):
     ) -> AgentResponse:
         logger.info(f"[AGENT] case_analysis execute session={session_id}")
         # 1. RAG retrieval for relevant laws
+        history_text = extract_history_from_context(context)
         try:
-            law_results = await retrieve_legal(user_input, top_k=5)
+            law_results = await retrieve_legal(user_input, top_k=5, history_text=history_text)
         except Exception as e:
             logger.warning(f"Law retrieval failed: {e}")
             law_results = []
@@ -106,8 +109,9 @@ class CaseAnalysisAgent(BaseAgent):
         self, session_id: str, user_input: str, context: list[dict],
     ) -> AsyncGenerator[Union[str, AgentResponse], None]:
         logger.info(f"[AGENT] case_analysis stream session={session_id}")
+        history_text = extract_history_from_context(context)
         try:
-            law_results = await retrieve_legal(user_input, top_k=5)
+            law_results = await retrieve_legal(user_input, top_k=5, history_text=history_text)
         except Exception:
             law_results = []
 

@@ -57,8 +57,12 @@ class Settings(BaseSettings):
     # File storage
     data_dir: str = "data"
     uploads_dir: str = "data/uploads"
+    generated_dir: str = "data/generated"
     templates_dir: str = "data/templates"
     laws_dir: str = "data/laws"
+
+    # Long-term memory
+    memory_path: str = "data/memory.md"
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 

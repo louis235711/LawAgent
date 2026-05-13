@@ -1,7 +1,8 @@
 import json
+import os
 import uuid
 from fastapi import APIRouter, UploadFile, File, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, FileResponse
 from src.api.schemas import (
     ChatRequest, ChatResponse, SessionResponse,
     UploadResponse, HistoryMessage, HealthResponse,
@@ -136,6 +137,7 @@ async def chat_stream(session_id: str, req: ChatRequest):
                 if isinstance(item, AgentResponse):
                     done_data = json.dumps({
                         "done": True,
+                        "content": item.content,
                         "session_id": session_id,
                         "references": item.references,
                         "metadata": item.metadata,
@@ -158,17 +160,60 @@ async def chat_stream(session_id: str, req: ChatRequest):
     return StreamingResponse(generate(), media_type="text/event-stream")
 
 
+SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".xlsx", ".png", ".jpg", ".jpeg", ".md", ".txt"}
+
+
 @router.post("/upload/{session_id}", response_model=UploadResponse)
-async def upload_pdf(session_id: str, file: UploadFile = File(...)):
-    if not file.filename or not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="仅支持 PDF 格式")
+async def upload_file(session_id: str, file: UploadFile = File(...)):
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="未提供文件")
+
+    ext = file.filename.lower().rsplit(".", 1)
+    if len(ext) != 2 or f".{ext[1]}" not in SUPPORTED_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"不支持的文件格式，支持: {', '.join(sorted(SUPPORTED_EXTENSIONS))}",
+        )
 
     content = await file.read()
-    if len(content) > 50 * 1024 * 1024:  # 50MB limit
-        raise HTTPException(status_code=400, detail="文件大小不能超过 50MB")
+    file_size = len(content)
 
-    result = await process_upload(session_id, content, file.filename)
+    if file_size > 1 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="文件大小不能超过 1MB，请压缩后重试")
+
+    try:
+        result = await process_upload(session_id, content, file.filename, file_size)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except Exception as e:
+        logger.error(f"Upload processing failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"文档处理失败: {e}")
+
     return UploadResponse(**result)
+
+
+@router.get("/download/{session_id}/{filename}")
+async def download_file(session_id: str, filename: str):
+    """Download a generated document file."""
+    from src.config import settings
+    # Check generated_dir first, then uploads_dir
+    for base in [settings.generated_dir, settings.uploads_dir]:
+        file_path = os.path.join(base, session_id, filename)
+        if os.path.isfile(file_path):
+            return FileResponse(file_path, filename=filename, media_type="application/octet-stream")
+    raise HTTPException(status_code=404, detail="文件不存在或已过期")
+
+
+@router.delete("/session/{session_id}/document")
+async def remove_session_document(session_id: str):
+    """Mark session document as removed (does not delete files/vectors)."""
+    from src.database.redis import update_session
+    from src.rag.bm25 import remove_session_bm25
+    await update_session(session_id, has_document=False, document_name="", file_size=0)
+    remove_session_bm25(session_id)
+    return {"status": "removed", "session_id": session_id}
 
 
 @router.get("/session/{session_id}/history")
@@ -183,6 +228,9 @@ async def session_history(session_id: str):
         "state": session.get("state"),
         "has_document": session.get("has_document"),
         "document_name": session.get("document_name"),
+        "file_size": session.get("file_size", 0),
+        "chunk_count": session.get("chunk_count", 0),
+        "use_rag": session.get("use_rag", False),
         "messages": [
             HistoryMessage(**m) for m in pg_messages
         ],
@@ -191,6 +239,19 @@ async def session_history(session_id: str):
 
 @router.delete("/session/{session_id}")
 async def remove_session(session_id: str):
+    # Extract long-term memory from conversation before deletion
+    try:
+        pg_msgs = get_messages(session_id, limit=100)
+        if pg_msgs:
+            lines = []
+            for m in pg_msgs:
+                role = "用户" if m["role"] == "user" else "AI"
+                lines.append(f"{role}: {m['content']}")
+            from src.memory.long_term import schedule_memory_update
+            schedule_memory_update("\n".join(lines))
+    except Exception:
+        pass
+
     await delete_session(session_id)
     try:
         from src.database.postgres import get_conn, put_conn
@@ -209,9 +270,15 @@ async def remove_session(session_id: str):
     except Exception:
         pass
 
+    # Clean up session BM25 index
+    try:
+        from src.rag.bm25 import remove_session_bm25
+        remove_session_bm25(session_id)
+    except Exception:
+        pass
+
     # Clean up uploaded files on disk
     import shutil
-    import os
     from src.config import settings
     upload_dir = os.path.join(settings.uploads_dir, session_id)
     if os.path.isdir(upload_dir):

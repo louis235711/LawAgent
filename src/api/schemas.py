@@ -23,6 +23,8 @@ class UploadResponse(BaseModel):
     filename: str
     chunks: int
     total_tokens: int
+    file_size: int = 0
+    use_rag: bool = False
 
 
 class HistoryMessage(BaseModel):
@@ -32,6 +34,7 @@ class HistoryMessage(BaseModel):
     create_time: str
     message_type: str
     references: list[dict] = []
+    metadata: dict = {}
 
 
 class HealthResponse(BaseModel):

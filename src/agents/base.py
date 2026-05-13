@@ -15,6 +15,9 @@ class AgentResponse:
     # Suggested next actions (empty = dispatcher decides)
     next_actions: list[str] = field(default_factory=list)
 
+    # Content to store in conversation memory (if different from display content)
+    memory_content: str | None = None
+
 
 class BaseAgent(ABC):
     """Base class for all business agents.

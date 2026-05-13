@@ -6,7 +6,7 @@ const state = {
   activeId: null,
   messages: [],           // current session messages
   streaming: false,
-  uploadedDoc: null,      // { name } or null
+  uploadedDoc: null,      // { name, size } or null
 };
 
 // ─── DOM refs ─────────────────────────────────────────
@@ -139,9 +139,10 @@ async function switchSession(id) {
         content: m.content,
         message_type: m.message_type,
         references: m.references || [],
+        metadata: m.metadata || {},
       }));
       if (data.has_document) {
-        state.uploadedDoc = { name: data.document_name || '已上传文档' };
+        state.uploadedDoc = { name: data.document_name || '已上传文档', size: data.file_size || 0 };
       }
     }
   } catch { /* ignore */ }
@@ -181,6 +182,28 @@ function createMessageElement(m, isLast) {
   const bubble = document.createElement('div');
   bubble.className = 'message-bubble';
   bubble.innerHTML = m.role === 'ai' ? marked.parse(m.content) : `<p>${escapeHtml(m.content)}</p>`;
+
+  // Document download box (above the AI message bubble)
+  if (m.role === 'ai' && m.metadata && m.metadata.download_url) {
+    const dlRow = document.createElement('div');
+    dlRow.className = 'refs-row';
+    const dlSpacer = document.createElement('div');
+    dlSpacer.className = 'refs-spacer';
+    const dlContent = document.createElement('div');
+    dlContent.className = 'download-box';
+    dlContent.innerHTML = `
+      <div class="download-box-inner">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+        <span class="download-box-name">${escapeHtml(m.metadata.filename || '文档')}</span>
+        <a class="btn-download" href="${m.metadata.download_url}" download="${m.metadata.filename || ''}">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          下载
+        </a>
+      </div>`;
+    dlRow.appendChild(dlSpacer);
+    dlRow.appendChild(dlContent);
+    wrapper.appendChild(dlRow);
+  }
 
   // Copy button for AI messages
   if (m.role === 'ai') {
@@ -236,6 +259,7 @@ function createRefsBox(refs) {
   const laws = refs.filter(r => r.type === 'law');
   const cases = refs.filter(r => r.type === 'case');
   const docChunks = refs.filter(r => r.type === 'doc_chunk');
+  const docChunkSummary = refs.filter(r => r.type === 'doc_chunk_summary');
 
   const box = document.createElement('div');
   box.className = 'refs-box';
@@ -300,6 +324,19 @@ function createRefsBox(refs) {
         urlEl.title = r.url;
         item.appendChild(urlEl);
       }
+      group.appendChild(item);
+    });
+    body.appendChild(group);
+  }
+
+  if (docChunkSummary.length > 0) {
+    const group = document.createElement('div');
+    group.className = 'refs-group';
+    group.innerHTML = '<div class="refs-group-title">文档检索</div>';
+    docChunkSummary.forEach(r => {
+      const item = document.createElement('div');
+      item.className = 'refs-item refs-item-law';
+      item.textContent = `从文档中搜寻到 ${r.count} 条相关内容`;
       group.appendChild(item);
     });
     body.appendChild(group);
@@ -528,7 +565,7 @@ function scrollToBottom() {
 }
 
 // ─── Upload ───────────────────────────────────────────
-async function uploadPDF(file) {
+async function uploadFile(file) {
   if (!state.activeId) {
     try {
       const r = await fetch('/api/session', { method: 'POST' });
@@ -539,38 +576,71 @@ async function uploadPDF(file) {
     } catch { return; }
   }
 
+  // Show upload bar with parsing state immediately
+  state.uploadedDoc = { name: file.name, size: file.size, parsing: true };
+  updateUploadBar();
+
   const form = new FormData();
   form.append('file', file);
 
   try {
-    showToast('正在解析文档...');
     const r = await fetch(`/api/upload/${state.activeId}`, { method: 'POST', body: form });
     if (!r.ok) {
       const err = await r.json();
+      state.uploadedDoc = null;
+      updateUploadBar();
       showToast(err.detail || '上传失败');
       return;
     }
     const data = await r.json();
-    state.uploadedDoc = { name: data.filename };
+    state.uploadedDoc = { name: data.filename, size: data.file_size || file.size };
     updateUploadBar();
-    showToast(`文档 "${data.filename}" 已就绪，共 ${data.chunks} 个片段`);
-  } catch {
-    showToast('上传失败，请检查网络');
+    showToast(`文档 "${data.filename}" 解析完成，共 ${data.chunks} 个片段`);
+  } catch (e) {
+    state.uploadedDoc = null;
+    updateUploadBar();
+    const msg = e.message || '上传失败';
+    showToast(msg.includes('Failed to fetch') || msg.includes('NetworkError')
+      ? '无法连接服务器，请确认后端已启动'
+      : `上传失败: ${msg}`);
   }
+}
+
+function formatFileSize(bytes) {
+  if (!bytes || bytes === 0) return '';
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+  return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
 }
 
 function updateUploadBar() {
   if (state.uploadedDoc) {
+    const doc = state.uploadedDoc;
     dom.uploadBar.hidden = false;
-    dom.uploadName.textContent = state.uploadedDoc.name;
+    if (doc.parsing) {
+      dom.uploadName.innerHTML = '正在解析 <span class="parsing-dots"><span>.</span><span>.</span><span>.</span></span>';
+      dom.uploadName.style.color = 'var(--text-hint)';
+      const sizeEl = document.getElementById('uploadFileSize');
+      if (sizeEl) sizeEl.textContent = formatFileSize(doc.size);
+    } else {
+      dom.uploadName.textContent = doc.name;
+      dom.uploadName.style.color = '';
+      const sizeEl = document.getElementById('uploadFileSize');
+      if (sizeEl) sizeEl.textContent = formatFileSize(doc.size);
+    }
   } else {
     dom.uploadBar.hidden = true;
   }
 }
 
-function removeDocument() {
+async function removeDocument() {
   state.uploadedDoc = null;
   updateUploadBar();
+  if (state.activeId) {
+    try {
+      await fetch(`/api/session/${state.activeId}/document`, { method: 'DELETE' });
+    } catch { /* ignore */ }
+  }
   showToast('文档已移除');
 }
 
@@ -682,7 +752,13 @@ dom.overlay.addEventListener('click', () => {
 $('#btnUpload').addEventListener('click', () => dom.fileInput.click());
 dom.fileInput.addEventListener('change', () => {
   if (dom.fileInput.files.length) {
-    uploadPDF(dom.fileInput.files[0]);
+    const file = dom.fileInput.files[0];
+    if (file.size > 1 * 1024 * 1024) {
+      showToast('文件大小不能超过 1MB，请压缩后重试');
+      dom.fileInput.value = '';
+      return;
+    }
+    uploadFile(file);
     dom.fileInput.value = '';
   }
 });

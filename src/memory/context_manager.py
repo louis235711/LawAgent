@@ -22,7 +22,7 @@ def _estimate_message_tokens(msg: dict) -> int:
     return count_tokens(content) if content else 0
 
 
-async def add_message(session_id: str, role: str, content: str, message_type: str = "咨询", references: list[dict] | None = None) -> int:
+async def add_message(session_id: str, role: str, content: str, message_type: str = "咨询", references: list[dict] | None = None, metadata: dict | None = None) -> int:
     """Append a message to short-term memory and persist to PostgreSQL."""
     data = await get_session(session_id)
     if data is None:
@@ -38,7 +38,7 @@ async def add_message(session_id: str, role: str, content: str, message_type: st
     data["window_token_count"] = _calc_window_tokens(data)
     await update_session(session_id, **data)
 
-    pg_save_message(session_id, role, content, token_count, message_type, references)
+    pg_save_message(session_id, role, content, token_count, message_type, references, metadata)
     return token_count
 
 
@@ -120,6 +120,10 @@ async def check_and_summarize(session_id: str) -> bool:
     logger.info(f"Session {session_id}: summarized {take} messages ({cumulative} tokens) → "
                 f"summary #{len(summary_list)}, remaining {len(remaining)} msgs, "
                 f"window={data['window_token_count']} tokens")
+
+    # Fire-and-forget long-term memory update from the summarized messages
+    from src.memory.long_term import schedule_memory_update
+    schedule_memory_update(history_text)
     return True
 
 

@@ -5,7 +5,8 @@ from src.vector_db.milvus_client import (
     LEGAL_KNOWLEDGE_COLLECTION,
     SESSION_DOCUMENTS_COLLECTION,
 )
-from src.rag.bm25 import get_legal_bm25, build_legal_bm25
+from src.rag.bm25 import get_legal_bm25, build_legal_bm25, get_session_bm25, ensure_session_bm25
+from src.rag.query_rewriter import rewrite_query
 from loguru import logger
 
 RRF_K = 60  # RRF smoothing constant
@@ -97,10 +98,16 @@ async def insert_chunks(
     coll.flush()
 
 
-async def retrieve_legal(query: str, top_k: int = 5) -> list[dict]:
+async def retrieve_legal(query: str, top_k: int = 5, history_text: str = "") -> list[dict]:
     """Hybrid retrieval: BM25 + Cosine vector search → RRF fusion → rerank → top_k."""
-    logger.info(f"[RAG] query: {query[:100]}")
-    query_vec = (await embed_texts([query]))[0]
+    # Rewrite query for better legal retrieval
+    if history_text:
+        rewritten = await rewrite_query(query, history_text)
+    else:
+        rewritten = query
+
+    logger.info(f"[RAG] query: {query}" + (f" → rewritten: {rewritten}" if rewritten != query else ""))
+    query_vec = (await embed_texts([rewritten]))[0]
 
     # 1. Vector search: over-retrieve 30
     coll = get_collection(LEGAL_KNOWLEDGE_COLLECTION)
@@ -125,7 +132,7 @@ async def retrieve_legal(query: str, top_k: int = 5) -> list[dict]:
 
     # 2. BM25 search: over-retrieve 30
     bm25 = get_legal_bm25()
-    bm25_results = bm25.search(query, top_k=30)
+    bm25_results = bm25.search(rewritten, top_k=30)
 
     if bm25_results:
         _bm25_items = [
@@ -178,17 +185,17 @@ async def retrieve_legal(query: str, top_k: int = 5) -> list[dict]:
         return []
 
     # 5. Rerank unique documents → final top_k, then filter by relevance threshold
-    reranked = await rerank(query, documents, top_k=top_k)
+    reranked = await rerank(rewritten, documents, top_k=top_k)
 
     # Filter out low-relevance results
     reranked = [r for r in reranked if r["relevance_score"] >= 0.4]
     logger.debug(f"[RAG:RERANK] after score filter (>=0.4): {len(reranked)} results")
 
     _rerank_items = [
-        f"idx={r['index']}({r['relevance_score']:.4f}):{_truncate(documents[r['index']], 60)}"
+        f"  [{r['relevance_score']:.4f}] {documents[r['index']]}"
         for r in reranked
     ]
-    logger.info(f"[RAG:RERANK] final top{len(reranked)}:\n  " + "\n  ".join(_rerank_items))
+    logger.info(f"[RAG:RERANK] final {len(reranked)} results:\n" + "\n".join(_rerank_items))
 
     results = []
     for r in reranked:
@@ -252,47 +259,88 @@ async def build_bm25_from_collection():
 async def retrieve_session_docs(
     query: str,
     session_id: str | None = None,
-    top_k: int = 10,
+    top_k: int = 5,
+    history_text: str = "",
 ) -> list[dict]:
-    """Vector retrieval for session documents."""
-    logger.info(f"[RAG:DOC] query: {query[:100]} session={session_id}")
+    """Hybrid retrieval for session documents: BM25 + Vector → RRF → rerank."""
+    if history_text:
+        rewritten = await rewrite_query(query, history_text)
+    else:
+        rewritten = query
+
+    logger.info(f"[RAG:DOC] query: {query}" + (f" → rewritten: {rewritten}" if rewritten != query else ""))
+    query_vec = (await embed_texts([rewritten]))[0]
+
+    # 1. Vector search
     coll = get_collection(SESSION_DOCUMENTS_COLLECTION)
-
-    query_vec = (await embed_texts([query]))[0]
-
     search_params = {"metric_type": "COSINE", "params": {"nprobe": 16}}
     expr = f'session_id == "{session_id}"' if session_id else None
 
-    results = coll.search(
+    vec_results = coll.search(
         data=[query_vec],
         anns_field="vector",
         param=search_params,
-        limit=top_k * 3,
+        limit=30,
         expr=expr,
         output_fields=["chunk_text", "document_name", "chunk_index"],
     )
+    vec_hits = vec_results[0]
+    logger.debug(f"[RAG:DOC:VEC] hits: {len(vec_hits)}")
 
-    hits = results[0]
-    logger.debug(f"[RAG:DOC] vector hits: {len(hits)}")
+    # 2. BM25 search (rebuild from Milvus if lost after restart)
+    bm25 = await ensure_session_bm25(session_id) if session_id else None
+    bm25_results = bm25.search(rewritten, top_k=30) if bm25 else []
+    logger.debug(f"[RAG:DOC:BM25] hits: {len(bm25_results)}")
 
-    if not hits:
+    if not vec_hits and not bm25_results:
         return []
 
-    documents = [hit.entity.get("chunk_text") or "" for hit in hits]
-    reranked = await rerank(query, documents, top_k=top_k)
+    # 3. RRF fusion
+    vec_indices = [(hit.id, hit.distance) for hit in vec_hits]
+    fused_indices = _rrf_fusion(vec_indices, bm25_results, top_k=30)
 
-    _rerank_items = [
-        f"idx={r['index']}({r['relevance_score']:.4f}):{_truncate(documents[r['index']], 60)}"
+    # 4. Build document list (deduplicated)
+    id_to_hit = {hit.id: hit for hit in vec_hits}
+    bm25_docs: dict[int, str] = {}
+    for doc_idx, _ in bm25_results:
+        if doc_idx < len(bm25.documents):
+            bm25_docs[doc_idx] = bm25.documents[doc_idx]
+
+    documents = []
+    seen: set[str] = set()
+    for idx in fused_indices:
+        hit = id_to_hit.get(idx)
+        if hit:
+            text = hit.entity.get("chunk_text") or ""
+            if text and text not in seen:
+                seen.add(text)
+                documents.append(text)
+        elif idx in bm25_docs:
+            text = bm25_docs[idx]
+            if text and text not in seen:
+                seen.add(text)
+
+    logger.debug(f"[RAG:DOC] after dedup: {len(documents)} unique docs")
+
+    if not documents:
+        return []
+
+    # 5. Rerank
+    reranked = await rerank(rewritten, documents, top_k=top_k)
+    reranked = [r for r in reranked if r["relevance_score"] >= 0.3]
+
+    _doc_items = [
+        f"  [{r['relevance_score']:.4f}] {documents[r['index']]}"
         for r in reranked
     ]
-    logger.info(f"[RAG:DOC:RERANK] top{len(reranked)}:\n  " + "\n  ".join(_rerank_items))
+    logger.info(f"[RAG:DOC:RERANK] final {len(reranked)} results:\n" + "\n".join(_doc_items))
 
+    # Build results with metadata from vec_hits where available
+    id_to_hit_full = {hit.id: hit for hit in vec_hits}
     return [
         {
             "chunk_text": documents[r["index"]],
             "score": r["relevance_score"],
-            "document_name": hits[r["index"]].entity.get("document_name"),
-            "chunk_index": hits[r["index"]].entity.get("chunk_index"),
         }
         for r in reranked
     ]

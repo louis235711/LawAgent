@@ -105,3 +105,59 @@ def build_legal_bm25(documents: list[str], metadata: list[dict] | None = None):
 def reset_legal_bm25():
     global _legal_bm25
     _legal_bm25 = None
+
+
+# Per-session BM25 indices for user-uploaded documents
+_session_bm25: dict[str, BM25] = {}
+
+
+def get_session_bm25(session_id: str) -> BM25 | None:
+    return _session_bm25.get(session_id)
+
+
+def build_session_bm25(session_id: str, documents: list[str]):
+    bm25 = BM25()
+    bm25.index(documents)
+    _session_bm25[session_id] = bm25
+
+
+def remove_session_bm25(session_id: str):
+    _session_bm25.pop(session_id, None)
+
+
+async def ensure_session_bm25(session_id: str) -> BM25 | None:
+    """Get or build session BM25, recovering from Milvus if lost (e.g. after restart)."""
+    existing = _session_bm25.get(session_id)
+    if existing is not None:
+        return existing
+
+    # Rebuild from Milvus session document chunks
+    try:
+        from src.vector_db.milvus_client import get_collection, SESSION_DOCUMENTS_COLLECTION
+
+        coll = get_collection(SESSION_DOCUMENTS_COLLECTION)
+        offset = 0
+        batch = 500
+        chunks = []
+        while True:
+            results = coll.query(
+                expr=f'session_id == "{session_id}"',
+                output_fields=["chunk_text", "chunk_index"],
+                limit=batch,
+                offset=offset,
+            )
+            if not results:
+                break
+            results.sort(key=lambda r: r.get("chunk_index", 0))
+            chunks.extend(r.get("chunk_text") or "" for r in results)
+            if len(results) < batch:
+                break
+            offset += batch
+
+        if chunks:
+            build_session_bm25(session_id, chunks)
+            return _session_bm25[session_id]
+    except Exception:
+        pass
+
+    return None

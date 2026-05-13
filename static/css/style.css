@@ -219,6 +219,26 @@ svg{display:block;flex-shrink:0}
 }
 .btn-copy:hover{color:var(--primary);border-color:var(--primary)}
 .btn-copy.copied{color:#27ae60;border-color:#27ae60}
+.btn-download{
+  display:inline-flex;align-items:center;gap:4px;padding:4px 10px;
+  border-radius:6px;font-size:12px;color:var(--primary);text-decoration:none;
+  background:#f0eff8;transition:all var(--transition);
+}
+.btn-download:hover{background:var(--primary);color:#fff}
+
+/* Download box — file card above AI message */
+.download-box{
+  background:#f5f4fa;border:1px solid var(--border-light);
+  border-radius:10px;padding:10px 14px;max-width:420px;
+}
+.download-box-inner{
+  display:flex;align-items:center;gap:10px;
+}
+.download-box-inner svg:first-child{color:var(--primary);flex-shrink:0}
+.download-box-name{
+  flex:1;font-size:13px;font-weight:500;color:var(--text-primary);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+}
 
 /* References row — mirrors .message-row.ai alignment */
 .refs-row{
@@ -311,15 +331,29 @@ svg{display:block;flex-shrink:0}
 
 /* === Upload Bar === */
 .upload-bar{
-  display:flex;align-items:center;gap:8px;
-  padding:8px 16px;background:#f5f4fa;border-top:1px solid var(--border-light);
+  align-items:center;gap:10px;
+  padding:10px 16px;background:#f5f4fa;border-top:1px solid var(--border-light);
   font-size:13px;color:var(--text-secondary);flex-shrink:0;
+  min-height:44px;
 }
+.upload-bar:not([hidden]){display:flex}
+.upload-bar-icon{color:var(--primary);flex-shrink:0}
+.upload-bar-info{display:flex;flex-direction:column;gap:1px;flex:1;min-width:0}
+.upload-bar-name{
+  font-weight:500;color:var(--text-primary);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+}
+.upload-bar-size{font-size:11px;color:var(--text-hint)}
 .btn-remove-doc{
-  padding:2px;border-radius:50%;margin-left:auto;
+  padding:4px;border-radius:50%;margin-left:auto;flex-shrink:0;
   color:var(--text-hint);transition:all var(--transition);
 }
-.btn-remove-doc:hover{color:#e74c3c}
+.btn-remove-doc:hover{color:#e74c3c;background:rgba(231,76,60,.08)}
+.parsing-dots{display:inline-flex;gap:1px}
+.parsing-dots span{animation:parseBounce 1.2s infinite}
+.parsing-dots span:nth-child(2){animation-delay:.2s}
+.parsing-dots span:nth-child(3){animation-delay:.4s}
+@keyframes parseBounce{0%,60%,100%{opacity:.2}30%{opacity:1}}
 
 /* === Input Area === */
 .input-area{flex-shrink:0;padding:0 24px 16px;background:var(--bg-input)}
@@ -338,6 +372,14 @@ svg{display:block;flex-shrink:0}
   padding:4px 0;background:transparent;
 }
 .input-wrapper textarea::placeholder{color:var(--text-hint)}
+
+.btn-upload{
+  width:34px;height:34px;border-radius:8px;flex-shrink:0;
+  color:var(--text-secondary);
+  display:flex;align-items:center;justify-content:center;
+  transition:all var(--transition);
+}
+.btn-upload:hover{color:var(--primary);background:#f0eff8}
 
 .btn-send{
   width:34px;height:34px;border-radius:8px;flex-shrink:0;
@@ -389,9 +431,15 @@ svg{display:block;flex-shrink:0}
 [data-theme="dark"] .refs-header{color:#999}
 [data-theme="dark"] .refs-arrow{color:#888}
 [data-theme="dark"] .upload-bar{background:#222231;border-top-color:var(--border-light)}
+[data-theme="dark"] .upload-bar-name{color:#e0e0e8}
+[data-theme="dark"] .btn-upload:hover{color:var(--primary);background:#2a2a3d}
 [data-theme="dark"] .input-wrapper{background:#1a1a24}
 [data-theme="dark"] .btn-copy{background:#2a2a38;border-color:#3e3e52;color:var(--text-secondary)}
 [data-theme="dark"] .btn-copy:hover{color:var(--primary);border-color:var(--primary)}
+[data-theme="dark"] .btn-download{background:#25253a}
+[data-theme="dark"] .btn-download:hover{background:var(--primary);color:#fff}
+[data-theme="dark"] .download-box{background:#222231;border-color:var(--border-light)}
+[data-theme="dark"] .download-box-name{color:#e0e0e8}
 [data-theme="dark"] .msg-error .message-bubble{background:#3d2020;border-color:#6b3030;color:#e0a0a0}
 [data-theme="dark"] .typing-dots span{background:#5a5888}
 [data-theme="dark"] .btn-send:disabled{background:#3a3660}
