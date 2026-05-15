@@ -6,7 +6,7 @@ CREATE TABLE IF NOT EXISTS conversation_messages (
     token_count INT NOT NULL DEFAULT 0,
     create_time TIMESTAMP NOT NULL DEFAULT NOW(),
     message_type VARCHAR(20) NOT NULL DEFAULT '咨询'
-        CHECK (message_type IN ('咨询', '文档', '文书', '案情', '追问'))
+        CHECK (message_type IN ('咨询', '文档', '文书', '案情', '追问', '其他'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_messages_session_id ON conversation_messages(session_id);

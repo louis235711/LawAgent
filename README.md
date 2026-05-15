@@ -10,7 +10,7 @@
 | 案情分析 | 提取案情要素，检索法条 + 联网类案搜索，生成结构化分析报告 |
 | 文档问答 | 上传文档（PDF/Word/Excel/图片等），对内容提问，混合检索精准定位 |
 | 合同审查 | 分块并行审查 + 最终整合报告，风险等级、问题条款、修改建议、原文引用 |
-| 文书撰写 | LLM 直接生成法律文书，支持 docx/md/txt 导出，前端一键下载 |
+| 文书撰写 | LLM 生成法律文书，支持 pdf/docx/md/txt 导出，PDF 排版美观适合打印，前端一键下载 |
 | 追问/聊天 | 多轮对话上下文维护 + 长期用户偏好记忆，不触发新检索 |
 
 **安全机制**：所有用户输入先经合规检测（合法 / 无关 / 违规），违规内容直接拦截。
@@ -18,21 +18,17 @@
 ## 系统架构
 
 ```
-用户请求 → 安全检测 → 关键词预检 + LLM 意图识别 → 路由分发
-                                                    │
-       ┌────────────────┬──────────┬────────┬────────┼────────┬────────┐
-       ▼                ▼          ▼        ▼        ▼        ▼        ▼
-  法律咨询          案情分析   文档提问  合同审查  文书撰写  追问/聊天
-  (RAG双路检索)   (RAG+联网)  (混合检索) (并行审查) (LLM生成) (上下文回答)
-       │                │          │        │        │        │
-       └────────────────┴──────────┴────────┴────────┴────────┘
-                                         │
-                          ┌──────────────┼──────────────┐
-                          ▼              ▼              ▼
-                     短期记忆(Redis)  长期偏好(memory.md)  摘要压缩
+用户请求 → 安全检测 → ReAct Agent（思考+工具调用循环）
+    │                                    │
+    ▼                                    ▼
+合规拦截(直接拒绝)               thinking → tool_use → tool_result
+                                          │            │
+                               ┌──────────┴─────┬──────┘
+                               ▼                ▼
+                         RAG 检索 + 工具     LLM 综合 → 流式输出
 ```
 
-**数据流**：Query → Query 改写（消解指代+法言法语化） → BM25 + 向量双路检索 → RRF 融合 → Rerank (qwen3-rerank) → LLM 生成 (DeepSeek-V4-Flash) → 回复
+**架构**：ReAct（Thinking + Tool Use）自主循环，LLM 先思考再决定调用工具或直接回答。工具调用结果反馈给 LLM 综合判断，最多 8 轮迭代，到达上限强制输出。支持流式 SSE 推送 thinking 折叠块 + 文本逐字 + 工具状态。
 
 ## 技术栈
 
@@ -49,6 +45,7 @@
 | Rerank | DashScope qwen3-rerank |
 | OCR | PaddleOCR (Docker 服务) |
 | 文档解析 | python-docx / openpyxl / PaddleOCR |
+| 文档生成 | python-docx / wkhtmltopdf + pdfkit（PDF 渲染） |
 | 联网搜索 | Tavily API |
 | 分词 | jieba（BM25 检索） |
 | 容器化 | Docker + docker-compose |
@@ -153,16 +150,17 @@ LawAgent/
 │   ├── main.py              # FastAPI 入口
 │   ├── config.py            # 配置管理
 │   ├── api/                 # 路由与数据模型
-│   ├── agents/              # 6 个 Agent（调度 + 5 业务）
+│   ├── agents/              # ReAct Agent（自主思考+工具调用）+ 调度器
 │   ├── llm/                 # LLM/Embedding/Rerank 客户端
 │   ├── rag/                 # RAG 检索管道（BM25+向量+RRF+Rerank+查询改写）
 │   ├── memory/              # 上下文管理（短期+摘要+长期偏好记忆）
 │   ├── database/            # PostgreSQL + Redis
 │   ├── vector_db/           # Milvus 连接与 Collection
 │   ├── document/            # 多格式文档解析与处理
-│   ├── tools/               # 联网搜索 + 模板管理
+│   ├── tools/               # 工具注册表 + 文书生成 + 联网搜索 + 计算器
 │   ├── security/            # 合规安全检测
 │   └── utils/               # Token 计数 + 文本分块
+├── static/                 # 前端静态文件（HTML/CSS/JS）
 ├── data/
 │   ├── laws/                # 法律知识库原文
 │   ├── templates/           # 文书模板
@@ -207,10 +205,10 @@ python tests/integration_test.py
 ## 后续规划
 
 - 多用户认证与权限
-- ReAct / Tool-use 多任务编排
-- 消息队列异步处理
-- 法律知识库扩充（刑法、劳动法、公司法等）
 - MCP 协议接入第三方法律服务
+- 消息队列异步处理（OCR、文档解析等重任务）
+- 法律知识库扩充（刑法、劳动法、公司法等）
+- PDF 文档解析与表格提取增强
 
 ## License
 

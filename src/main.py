@@ -10,12 +10,6 @@ from loguru import logger
 from src.config import settings
 from src.database.postgres import init_db
 from src.vector_db.milvus_client import init_collections
-from src.agents.dispatcher import register_agent
-from src.agents.legal_consultation import LegalConsultationAgent
-from src.agents.case_analysis import CaseAnalysisAgent
-from src.agents.document_qa import DocumentQAAgent
-from src.agents.document_writing import DocumentWritingAgent
-from src.agents.follow_up import FollowUpAgent
 from src.api.routes import router
 
 
@@ -42,13 +36,10 @@ logger.add(
 
 
 def _register_agents():
-    register_agent("法律咨询", LegalConsultationAgent())
-    register_agent("案情分析", CaseAnalysisAgent())
-    register_agent("文档提问", DocumentQAAgent())
-    register_agent("合同审查", DocumentQAAgent())
-    register_agent("文书撰写", DocumentWritingAgent())
-    register_agent("追问/聊天", FollowUpAgent())
-    logger.info("All agents registered")
+    # ReActAgent is the single autonomous agent — no registry needed.
+    # Old agents (legal_consultation, case_analysis, document_qa,
+    # document_writing, follow_up) are archived as reference.
+    logger.info("ReActAgent ready (single-agent architecture)")
 
 
 @asynccontextmanager

@@ -15,10 +15,11 @@ LawAgent/
 ├── .env                                   # 环境变量（API keys、数据库连接）
 ├── .env.example                           # 环境变量模板
 ├── .gitignore                             # Git 忽略规则
-├── requirements.txt                       # Python 依赖（12 项）
+├── requirements.txt                       # Python 依赖（13 项，含 anthropic SDK）
 ├── PRD.md                                 # 原始产品需求文档
 ├── migrations/
-│   └── 001_init.sql                       # conversation_messages 表结构
+│   ├── 001_init.sql                       # conversation_messages 表结构
+│   └── 002_react_memory.sql               # ReAct 记忆扩展（turn_id/step_type/tool_name）
 ├── memory-bank/
 │   ├── design-document.md                 # 系统设计文档（范围、用户旅程、验收标准）
 │   ├── tech-stack.md                      # 技术栈选型与理由
@@ -30,9 +31,9 @@ LawAgent/
 ├── static/
 │   ├── index.html                          # Web 聊天前端（ChatGPT 风格布局）
 │   ├── css/
-│   │   └── style.css                       # 完整样式（响应式/气泡/代码块）
+│   │   └── style.css                       # 完整样式（响应式/气泡/代码块/thinking/工具进度）
 │   └── js/
-│       └── app.js                          # 核心逻辑（SSE流式/Markdown/会话管理）
+│       └── app.js                          # 核心逻辑（SSE流式/ReAct thinking/工具进度/Markdown）
 ├── tests/
 │   └── integration_test.py                 # 端到端集成测试（27 用例）
 ├── data/
@@ -51,7 +52,7 @@ LawAgent/
     │   └── message_repo.py                # 消息持久化（save/get_messages）
     ├── llm/
     │   ├── __init__.py
-    │   ├── client.py                      # DeepSeek API 封装（streaming/非streaming/重试/角色转换）
+    │   ├── client.py                      # DeepSeek 双 SDK（OpenAI + Anthropic）/ReAct thinking/streaming/重试
     │   ├── embedding.py                   # DashScope text-embedding-v4（1024维）
     │   └── rerank.py                      # DashScope qwen3-rerank 重排
     ├── security/
@@ -73,15 +74,17 @@ LawAgent/
     ├── agents/
     │   ├── __init__.py
     │   ├── base.py                        # Agent 基类 + AgentResponse 数据类
-    │   ├── dispatcher.py                  # 总调度（意图识别/文档检查/路由分发/Agent注册表）
-    │   ├── legal_consultation.py          # 法律咨询 Agent（RAG检索+LLM生成+法条标注）
-    │   ├── case_analysis.py               # 案情分析 Agent（要素提取+RAG+Tavily搜索）
-    │   ├── document_qa.py                 # 文档提问/合同审查 Agent（双场景路由）
-    │   ├── document_writing.py            # 文书撰写 Agent（模板匹配+LLM填充+法言法语润色）
-    │   └── follow_up.py                   # 追问处理 Agent（纯上下文回答，不触发RAG）
+    │   ├── dispatcher.py                  # 调度器（简化为 ReAct 透传，无意图分类）
+    │   ├── react_agent.py                 # ★ ReAct Agent（单Agent，显式 thinking + tool_use 循环）
+    │   ├── legal_consultation.py          # [归档] 法律咨询 Agent
+    │   ├── case_analysis.py               # [归档] 案情分析 Agent
+    │   ├── document_qa.py                 # [归档] 文档提问/合同审查 Agent
+    │   ├── document_writing.py            # [归档] 文书撰写 Agent
+    │   └── follow_up.py                   # [归档] 追问处理 Agent
     ├── tools/
     │   ├── __init__.py
-    │   ├── web_search.py                  # Tavily 联网搜索（仅案情分析 Agent 使用）
+    │   ├── registry.py                    # ★ 工具注册表（5工具 Anthropic 格式 + 执行器）
+    │   ├── web_search.py                  # Tavily 联网搜索
     │   └── template_manager.py            # 文书模板管理（加载/列出/选择，3个模板）
     ├── utils/
     │   ├── __init__.py
@@ -95,17 +98,19 @@ LawAgent/
 
 ## 当前状态
 
-**阶段**：全部步骤完成（含 Web 前端）。
-**已完成步骤**：30/30（原 26 步 + 前端 4 步）
-**最后更新**：2026-05-10（Web 前端 4 步完成，前后端集成测试通过）
+**阶段**：Phase 10 — ReAct 自主决策 Agent 架构（已实施，待集成测试）。
+**已完成步骤**：核心 9 步完成（LLM/工具/Agent/记忆/调度/前端/迁移），集成测试 + 文档更新待补。
+**最后更新**：2026-05-15（ReAct 架构实施）
 
 ## 关键架构决策
 
-1. **文档切片不存 PostgreSQL**：切片原文直接存入 Milvus 标量字段，检索时一并返回
-2. **Agent 间函数直接调用**：无消息队列，dispatcher → agent.execute() → AgentResponse
-3. **安全优先**：所有用户输入先过 security guard（三分类），违规/无关即阻塞
-4. **上下文以当前问题为主**：组装时明确标注【历史记忆】vs【当前最新问题】
-5. **PDF 三级降级解析**：MinerU → pdfminer.six → raw text
-6. **分块四级降级**：标题 → 段落 → 句子标点 → 强制 Token 边界切分
-7. **SSE 流式输出**：新增 `POST /api/chat/{sid}/stream`，逐 token 推送到前端
-8. **纯静态前端**：HTML+CSS+JS，无构建工具，CDN 引入 marked.js + highlight.js
+1. **ReAct 单 Agent 替代多 Agent**：dispatcher 不再做意图分类，统一由 ReActAgent 自主决策
+2. **Anthropic 端点 + 显式 thinking**：使用 DeepSeek `/anthropic` 端点，原生 thinking block，用户可展开查看推理过程
+3. **5 工具封装**：search_laws / search_cases / search_documents / read_document_full / generate_document
+4. **记忆按 turn 分组**：每轮 ReAct 轨迹（thinking → tool_use → observation → final_answer）存入 structured memory
+5. **压缩按 turn 优先丢弃 thinking**：压缩时完整 turn 为单位，thinking 最先降级为摘要
+6. **文档切片不存 PostgreSQL**：切片原文直接存入 Milvus 标量字段，检索时一并返回
+7. **安全优先**：所有用户输入先过 security guard（三分类），违规/无关即阻塞
+8. **PDF 三级降级解析**：MinerU → pdfminer.six → raw text
+9. **SSE 流式输出**：支持 thinking_delta / tool_call / tool_result / delta 多种事件
+10. **纯静态前端**：HTML+CSS+JS，无构建工具，CDN 引入 marked.js + highlight.js

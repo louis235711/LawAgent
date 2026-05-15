@@ -35,6 +35,8 @@ class HistoryMessage(BaseModel):
     message_type: str
     references: list[dict] = []
     metadata: dict = {}
+    thinking: str = ""
+    tools: list[dict] = []
 
 
 class HealthResponse(BaseModel):

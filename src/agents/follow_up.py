@@ -36,7 +36,7 @@ class FollowUpAgent(BaseAgent):
 
         return AgentResponse(
             content=answer,
-            metadata={"message_type": "追问", "mode": "context_only"},
+            metadata={"message_type": "其他", "mode": "context_only"},
         )
 
     async def stream_execute(
@@ -53,5 +53,5 @@ class FollowUpAgent(BaseAgent):
 
         yield AgentResponse(
             content="".join(full),
-            metadata={"message_type": "追问", "mode": "context_only"},
+            metadata={"message_type": "其他", "mode": "context_only"},
         )

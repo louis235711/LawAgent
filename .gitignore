@@ -1,5 +1,50 @@
+# Python
 __pycache__/
 *.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# 环境变量与密钥
 .env
+*.key
+*.pem
+*.p12
+*.pfx
+credentials.json
+service-account.json
+
+# 日志
 logs/
 *.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Docker
+docker-compose.override.yml
+
+# 数据目录（运行时生成）
+data/uploads/*
+data/generated/*
+!data/uploads/.gitkeep
+!data/generated/.gitkeep
+
+# Claude Code 本地配置
+.claude/
+
+# 字体文件（运行时从系统复制）
+data/fonts/
+
+# 内存文件
+memory/

@@ -78,8 +78,8 @@ async def test_legal_consultation(client):
     # 追问不触发新RAG（应该是follow_up agent）
     r2 = await client.post(f"{BASE}/api/chat/{sid}", json={"message": "能举个具体例子吗？"})
     d2 = r2.json()
-    is_followup = d2["metadata"].get("agent") in ("follow_up", "追问/聊天")
-    record("追问延续上下文不触发新Agent", is_followup, d2["metadata"].get("agent", "unknown"))
+    is_followup = d2["metadata"].get("agent") in ("follow_up", "其他")
+    record("追问延续上下文不触发其他Agent", is_followup, d2["metadata"].get("agent", "unknown"))
 
 
 async def test_case_analysis(client):

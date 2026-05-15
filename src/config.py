@@ -62,7 +62,9 @@ class Settings(BaseSettings):
     laws_dir: str = "data/laws"
 
     # Long-term memory
-    memory_path: str = "data/memory.md"
+    memory_dir: str = "data/memory"
+    feedback_style_path: str = "data/memory/feedback_style.md"
+    user_role_path: str = "data/memory/user_role.md"
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 

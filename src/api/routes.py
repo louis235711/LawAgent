@@ -223,6 +223,25 @@ async def session_history(session_id: str):
         raise HTTPException(status_code=404, detail="会话不存在")
 
     pg_messages = get_messages(session_id, limit=50)
+
+    msgs_out = []
+    for m in pg_messages:
+        meta = m.get("metadata", {}) or {}
+        msg = {
+            "role": m.get("role"),
+            "content": m.get("content"),
+            "token_count": m.get("token_count", 0),
+            "create_time": m.get("create_time", ""),
+            "message_type": m.get("message_type"),
+            "references": m.get("references", []),
+            "metadata": meta,
+            "thinking": meta.get("thinking", ""),
+            "tools": meta.get("tools_used", []),
+        }
+        # Convert tools_used list to frontend-friendly format
+        if isinstance(msg["tools"], list):
+            msg["tools"] = [{"name": t, "completed": True, "summary": ""} for t in msg["tools"] if isinstance(t, str)]
+        msgs_out.append(msg)
     return {
         "session_id": session_id,
         "state": session.get("state"),
@@ -231,9 +250,7 @@ async def session_history(session_id: str):
         "file_size": session.get("file_size", 0),
         "chunk_count": session.get("chunk_count", 0),
         "use_rag": session.get("use_rag", False),
-        "messages": [
-            HistoryMessage(**m) for m in pg_messages
-        ],
+        "messages": msgs_out,
     }
 
 

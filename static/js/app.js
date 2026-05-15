@@ -140,6 +140,8 @@ async function switchSession(id) {
         message_type: m.message_type,
         references: m.references || [],
         metadata: m.metadata || {},
+        thinking: m.thinking || '',
+        toolsUsed: m.tools || [],
       }));
       if (data.has_document) {
         state.uploadedDoc = { name: data.document_name || '已上传文档', size: data.file_size || 0 };
@@ -203,6 +205,44 @@ function createMessageElement(m, isLast) {
     dlRow.appendChild(dlSpacer);
     dlRow.appendChild(dlContent);
     wrapper.appendChild(dlRow);
+  }
+
+  // Thinking block (rendered inside AI bubble, collapsed by default)
+  if (m.role === 'ai' && m.thinking) {
+    const thinkContainer = document.createElement('div');
+    thinkContainer.className = 'thinking-final';
+    const thinkHeader = document.createElement('div');
+    thinkHeader.className = 'thinking-header';
+    thinkHeader.innerHTML = '<span class="thinking-icon">🤔</span> <span class="thinking-label">思考过程</span><span class="thinking-toggle">▶</span>';
+    const thinkBody = document.createElement('div');
+    thinkBody.className = 'thinking-body';
+    thinkBody.textContent = m.thinking;
+    thinkBody.style.display = 'none'; // collapsed by default
+    thinkHeader.addEventListener('click', () => {
+      const collapsed = thinkBody.style.display === 'none';
+      thinkBody.style.display = collapsed ? 'block' : 'none';
+      thinkHeader.querySelector('.thinking-toggle').textContent = collapsed ? '▼' : '▶';
+      thinkHeader.querySelector('.thinking-label').textContent = collapsed ? '思考过程 (展开)' : '思考过程';
+    });
+    thinkContainer.appendChild(thinkHeader);
+    thinkContainer.appendChild(thinkBody);
+    bubble.appendChild(thinkContainer);
+  }
+
+  // Tool summary (compact, below thinking)
+  if (m.role === 'ai' && m.toolsUsed && m.toolsUsed.length > 0) {
+    const toolsRow = document.createElement('div');
+    toolsRow.className = 'tools-final';
+    m.toolsUsed.forEach(t => {
+      const icon = TOOL_ICONS[t.name] || '🔧';
+      const label = TOOL_LABELS[t.name] || t.name;
+      const span = document.createElement('span');
+      span.className = 'tool-final-tag' + (t.completed ? ' completed' : '');
+      span.textContent = `${icon} ${label}` + (t.summary ? `: ${t.summary}` : '');
+      span.title = t.summary || '';
+      toolsRow.appendChild(span);
+    });
+    bubble.appendChild(toolsRow);
   }
 
   // Copy button for AI messages
@@ -441,6 +481,11 @@ async function sendMessage(message) {
   let finalMeta = null;
   const STREAM_URL = `/api/chat/${state.activeId}/stream`;
 
+  // ReAct tracking
+  let thinkingText = '';
+  let thinkingBlock = null;
+  let toolProgressEls = {};
+
   try {
     const response = await fetch(STREAM_URL, {
       method: 'POST',
@@ -476,25 +521,44 @@ async function sendMessage(message) {
             streamBubble.innerHTML = '<div style="font-size:13px;color:#b0b0c0;padding:4px 0">📝 摘要中...</div>';
             continue;
           }
-          if (data.refs && data.refs.length > 0) {
-            const refsBox = createRefsBox(data.refs);
-            const placeholder = document.createElement('div');
-            placeholder.className = 'refs-row';
-            placeholder.id = 'streamingRefs';
-            const spacer = document.createElement('div');
-            spacer.className = 'refs-spacer';
-            const content = document.createElement('div');
-            content.className = 'refs-content';
-            content.appendChild(refsBox);
-            placeholder.appendChild(spacer);
-            placeholder.appendChild(content);
-            dom.messages.insertBefore(placeholder, streamRow);
+          // ── Thinking ────────────────────────────
+          if (data.type === 'thinking_delta') {
+            thinkingText += data.thinking || '';
+            if (!thinkingBlock) {
+              thinkingBlock = createThinkingBlock();
+              dom.messages.insertBefore(thinkingBlock, streamRow);
+            }
+            updateThinkingBlock(thinkingBlock, thinkingText);
             scrollToBottom();
             continue;
           }
+          // ── Tool call ──────────────────────────
+          if (data.status === 'tool_call') {
+            const toolName = data.tool || '';
+            const tp = createToolProgress(toolName, data.input || {});
+            dom.messages.insertBefore(tp, streamRow);
+            toolProgressEls[toolName] = tp;
+            scrollToBottom();
+            continue;
+          }
+          // ── Tool result ────────────────────────
+          if (data.status === 'tool_result') {
+            const toolName = data.tool || '';
+            const el = toolProgressEls[toolName];
+            if (el) {
+              completeToolProgress(el, data.summary || '');
+            }
+            scrollToBottom();
+            continue;
+          }
+          // ── Refs ──────────────────────────────
+          if (data.refs && data.refs.length > 0) {
+            streamRefs = data.refs;
+            continue;
+          }
+          // ── Done ──────────────────────────────
           if (data.done) {
             finalMeta = data;
-            // If content delivered directly (blocked messages, etc.)
             if (data.content && !fullContent) {
               fullContent = data.content;
               streamBubble.innerHTML = marked.parse(fullContent);
@@ -507,7 +571,6 @@ async function sendMessage(message) {
             });
             scrollToBottom();
           } else if (data.content) {
-            // Direct content without delta chunks
             fullContent = data.content;
             streamBubble.innerHTML = marked.parse(fullContent);
             scrollToBottom();
@@ -533,18 +596,27 @@ async function sendMessage(message) {
   }
 
   // Replace streaming bubble with final rendered message
+  const refs = finalMeta?.references || streamRefs || [];
+  const toolsUsed = [];
+  Object.entries(toolProgressEls).forEach(([name, el]) => {
+    const completed = el.classList.contains('completed');
+    const summary = el.querySelector('.tool-progress-status')?.textContent || '';
+    toolsUsed.push({ name, completed, summary });
+  });
   const aiMsg = {
     role: 'ai',
     content: fullContent,
+    thinking: thinkingText || '',
+    toolsUsed: toolsUsed,
     metadata: finalMeta?.metadata || { message_type: '咨询' },
-    references: finalMeta?.references || [],
+    references: refs,
   };
   state.messages.push(aiMsg);
   const finalEl = createMessageElement(aiMsg, true);
   streamRow.replaceWith(finalEl);
-  // Remove streaming refs placeholder — finalEl already has its own refs box
-  const streamingRefs = document.getElementById('streamingRefs');
-  if (streamingRefs) streamingRefs.remove();
+
+  // Remove streaming temp elements — content is now in finalEl
+  document.querySelectorAll('.thinking-block-stream, .tool-progress-stream').forEach(el => el.remove());
 
   // Update session
   addSession(state.activeId, null); // refresh time
@@ -669,29 +741,124 @@ function formatPipeline(meta) {
   const parts = ['安全检测 ✓'];
 
   const intent = meta.intent || meta.message_type;
-  if (intent) parts.push(`意图 → ${intent}`);
+  if (intent && intent !== '咨询') parts.push(intent);
 
   const agent = meta.agent;
-  if (agent) {
+  if (agent === 'react_agent') {
+    parts.push('ReAct Agent');
+  } else if (agent) {
     const agentNames = {
       legal_consultation: '法律咨询 Agent',
       case_analysis: '案情分析 Agent',
       document_qa: '文档问答 Agent',
       document_writing: '文书撰写 Agent',
-      follow_up: '追问处理 Agent',
+      follow_up: '其他',
     };
     parts.push(agentNames[agent] || agent);
   }
 
-  if (meta.law_count) parts.push(`RAG 检索 (${meta.law_count} 条法条)`);
-  if (meta.case_count) parts.push(`联网搜索 (${meta.case_count} 条类案)`);
-  if (meta.chunks_found !== undefined) parts.push(`文档检索 (${meta.chunks_found} 片段)`);
-  if (meta.template) parts.push(`模板: ${meta.template_name || meta.template}`);
+  if (meta.tools_used && meta.tools_used.length > 0) {
+    const toolNames = {
+      search_laws: '法条检索',
+      search_cases: '案例搜索',
+      search_documents: '文档检索',
+      read_document_full: '全文读取',
+      generate_document: '文书生成',
+      get_current_time: '获取时间',
+      calculate: '计算器',
+    };
+    const labels = meta.tools_used.map(t => toolNames[t] || t);
+    parts.push(labels.join(' + '));
+  }
+  if (meta.iterations) parts.push(`${meta.iterations} 轮推理`);
+  if (meta.law_count) parts.push(`${meta.law_count} 条法条`);
+  if (meta.case_count) parts.push(`${meta.case_count} 条类案`);
+  if (meta.chunks_found !== undefined) parts.push(`${meta.chunks_found} 片段`);
   if (meta.review) parts.push('全文审查');
   if (meta.mode === 'context_only') parts.push('纯上下文回答');
+  if (meta.forced) parts.push('达到最大轮次');
   if (meta.blocked) parts.push(`已拦截: ${meta.reason || ''}`);
 
   return parts.join(' → ');
+}
+
+// ─── ReAct UI: Thinking block ──────────────────────────
+function createThinkingBlock() {
+  const container = document.createElement('div');
+  container.className = 'thinking-block-stream';
+
+  const header = document.createElement('div');
+  header.className = 'thinking-header';
+  header.innerHTML = '<span class="thinking-icon">🤔</span> <span class="thinking-label">思考中...</span>';
+  header.addEventListener('click', () => {
+    const body = container.querySelector('.thinking-body');
+    const collapsed = body.style.display === 'none';
+    body.style.display = collapsed ? 'block' : 'none';
+    header.querySelector('.thinking-label').textContent = collapsed ? '思考中...' : '思考 (展开)';
+  });
+
+  const body = document.createElement('div');
+  body.className = 'thinking-body';
+
+  container.appendChild(header);
+  container.appendChild(body);
+  return container;
+}
+
+function updateThinkingBlock(block, text) {
+  const body = block.querySelector('.thinking-body');
+  body.textContent = text;
+  body.scrollTop = body.scrollHeight;
+}
+
+// ─── ReAct UI: Tool progress ───────────────────────────
+const TOOL_LABELS = {
+  search_laws: '检索法条',
+  search_cases: '搜索案例',
+  search_documents: '检索文档',
+  read_document_full: '读取全文',
+  generate_document: '生成文书',
+  get_current_time: '获取时间',
+  calculate: '计算器',
+};
+
+const TOOL_ICONS = {
+  search_laws: '📋',
+  search_cases: '🌐',
+  search_documents: '📄',
+  read_document_full: '📖',
+  generate_document: '📝',
+  get_current_time: '🕐',
+  calculate: '🔢',
+};
+
+function createToolProgress(toolName, input) {
+  const el = document.createElement('div');
+  el.className = 'tool-progress-stream';
+
+  const icon = TOOL_ICONS[toolName] || '🔧';
+  const label = TOOL_LABELS[toolName] || toolName;
+  let queryHint = '';
+  if (input && input.query) {
+    queryHint = `："${input.query.slice(0, 40)}${input.query.length > 40 ? '...' : ''}"`;
+  } else if (input && input.requirements) {
+    queryHint = `："${input.requirements.slice(0, 40)}${input.requirements.length > 40 ? '...' : ''}"`;
+  }
+
+  el.innerHTML = `<span class="tool-progress-icon">${icon}</span> <span class="tool-progress-label">正在${label}</span><span class="tool-progress-hint">${escapeHtml(queryHint)}</span><span class="tool-progress-dots"><span>.</span><span>.</span><span>.</span></span>`;
+  return el;
+}
+
+function completeToolProgress(el, summary) {
+  el.classList.add('completed');
+  const dots = el.querySelector('.tool-progress-dots');
+  if (dots) dots.remove();
+  const label = el.querySelector('.tool-progress-label');
+  if (label) label.textContent = label.textContent.replace('正在', '');
+  const status = document.createElement('span');
+  status.className = 'tool-progress-status';
+  status.textContent = `✅ ${summary}`;
+  el.appendChild(status);
 }
 
 function showWelcome() {

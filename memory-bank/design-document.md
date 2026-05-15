@@ -93,28 +93,35 @@ V1.0（基于 PRD V1.0 + 需求澄清）
   - `合法` → 进入多 Agent 调度
 - **兜底规则**：非违规 / 非无关 → 一律判定为合法
 
-### 3.2 意图识别与路由
+### 3.2 自主决策与路由（ReAct）
 
-总调度 Agent 负责：
+ReActAgent（单 Agent）负责所有业务决策：
 
-1. 检查 Redis 当前 session 的 state（有无已上传文档）
-2. 有文档 → 优先路由文档提问 Agent
-3. 无文档 → LLM 意图识别 → 路由对应业务 Agent：
-   - 法律咨询 → 法律咨询 Agent
-   - 案情分析 → 案情分析 Agent
-   - 文书撰写 → 文书撰写 Agent
-   - 追问 / 聊天 → 追问处理 Agent
-4. 汇总业务 Agent 返回结果 → 统一返回给用户
+1. 接收用户输入 + 会话上下文（Anthropic 格式）
+2. LLM 生成 thinking block（分析需求、规划步骤）
+3. LLM 决定 tool_use 或直接回答：
+   - 需要检索 → 调用 search_laws / search_cases / search_documents
+   - 需要审查 → 调用 read_document_full
+   - 需要文书 → 调用 generate_document
+   - 满足 → 直接输出 text
+4. 工具结果追加到上下文，循环直到完成或达到 max 8 轮
+5. 前端展示：thinking 可折叠 + 工具进度条
 
-### 3.3 记忆与上下文管理
+**不同于旧架构**：取消了意图分类 Prompt（易出错），由 LLM 自主判断需要什么工具。
+
+### 3.3 记忆与上下文管理（ReAct 重构）
 
 - **上下文窗口**：200k Token 滑动窗口
-- **记忆结构**：
-  - `short_term_memory`：消息数组 `[{role, content, token_count, timestamp}]`
-  - `summary_memory`：摘要文本（初始为空）
-- **摘要触发**：窗口占用率达 65% 时，对消息数组中前 5 轮对话生成摘要
-- **摘要 Token 上限**：动态计算（长对话自动提升上限）
-- **上下文组装顺序**：System Prompt → summary_memory → short_term_memory → 当前 User Prompt，并提示以当前User Propmt为主，其他记忆作为补充
+- **记忆结构**（增强）：
+  - `short_term_memory`：消息数组 `[{role, content, token_count, turn_id, step_type, tool_name?}]`
+  - `step_type`：user_input / thinking / tool_call / observation / final_answer
+  - `summary_list`：摘要文本数组
+- **上下文组装**（Anthropic 格式）：
+  - System Prompt → summary_list → Turn N-1 完整轨迹 → Turn N 完整轨迹 → 当前 User Prompt
+  - thinking block 必须保留回传（DeepSeek 要求，否则 400）
+- **摘要触发**：窗口占用率达 70% 时，按 turn 分组压缩最早 turn(s)
+- **压缩优先级**：thinking 原文 → tool 细节 → observation → final_answer（保留法条引用）
+- **保留策略**：至少保留最近 2 个 turn 的完整 ReAct 轨迹
 - **存储位置**：Redis（`legal_agent:session:{session_id}`），永不过期
 - **持久化**：PostgreSQL 存原始对话消息作为最终备份
 
