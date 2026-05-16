@@ -202,13 +202,9 @@ python tests/integration_test.py
 
 测试覆盖：安全检测 / 法律咨询 / 案情分析 / 文档处理 / 文书撰写 / 会话管理 / 边界情况，共 27 个用例。
 
-## 后续规划
+## 前端展示
+<img width="1869" height="914" alt="image" src="https://github.com/user-attachments/assets/ce8245b0-060e-4476-b62b-a6876a026b47" />
 
-- 多用户认证与权限
-- MCP 协议接入第三方法律服务
-- 消息队列异步处理（OCR、文档解析等重任务）
-- 法律知识库扩充（刑法、劳动法、公司法等）
-- PDF 文档解析与表格提取增强
 
 ## License
 
