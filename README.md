@@ -204,6 +204,8 @@ python tests/integration_test.py
 
 ## 前端展示
 <img width="1869" height="914" alt="image" src="https://github.com/user-attachments/assets/ce8245b0-060e-4476-b62b-a6876a026b47" />
+<img width="1834" height="896" alt="001" src="https://github.com/user-attachments/assets/baa4baca-247a-46f9-96d5-c543d9dc0cf8" />
+<img width="1857" height="902" alt="002" src="https://github.com/user-attachments/assets/6a941e30-731b-4e06-85f0-aeae07b723bd" />
 
 
 ## License
