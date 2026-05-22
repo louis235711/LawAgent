@@ -39,6 +39,22 @@ class HistoryMessage(BaseModel):
     tools: list[dict] = []
 
 
+class RegisterRequest(BaseModel):
+    username: str
+    password: str
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+class AuthResponse(BaseModel):
+    token: str
+    user_id: int
+    username: str
+
+
 class HealthResponse(BaseModel):
     status: str
     postgres: str

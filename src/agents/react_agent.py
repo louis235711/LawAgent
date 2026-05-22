@@ -13,6 +13,7 @@ from typing import Union
 from src.agents.base import BaseAgent, AgentResponse
 from src.llm.client import chat_completion_react, chat_completion_react_stream
 from src.tools.registry import TOOLS, execute_tool, make_tool_result
+from src.mcp.client import get_mcp_client
 from loguru import logger
 
 MAX_ITERATIONS = 8
@@ -31,6 +32,8 @@ SYSTEM_PROMPT = """你是专业法律AI助手。你可以自主思考（thinking
 - 文书撰写/合同起草/文档生成 → 必须调用 generate_document，不要自己直接输出文档内容
 - 文档提问 → 先 search_documents（片段检索）
 - 合同审查 → read_document_full（全文读取后逐条分析）
+- 用户提到之前讨论过的内容、需要回顾历史 → search_memory（跨会话长期记忆检索）
+- 需要读取网页内容 → mcp_fetch_fetch_markdown 或 mcp_fetch_fetch_html
 - 寒暄/简单追问/闲聊 → 直接回答，不调工具
 - 即使生成的是 Markdown 格式也必须用 generate_document 工具
 - 工具结果充分后立即给出最终回答，不要无意义循环
@@ -58,6 +61,15 @@ class ReActAgent(BaseAgent):
     def __init__(self):
         super().__init__("react_agent")
 
+    @staticmethod
+    def _get_all_tools() -> list[dict]:
+        """Merge internal TOOLS with external MCP tools."""
+        mcp = get_mcp_client()
+        external = mcp.list_external_tools()
+        if external:
+            return TOOLS + external
+        return TOOLS
+
     # ── Non-streaming execute ────────────────────────────────
 
     async def execute(
@@ -67,6 +79,7 @@ class ReActAgent(BaseAgent):
         system: str,
         messages: list[dict],
         turn_id: str,
+        user_id: int = 0,
     ) -> AgentResponse:
         logger.info(f"[REACT] execute session={session_id} turn={turn_id}")
 
@@ -81,7 +94,7 @@ class ReActAgent(BaseAgent):
                 response = await chat_completion_react(
                     messages=messages,
                     system=system,
-                    tools=TOOLS,
+                    tools=self._get_all_tools(),
                     thinking_budget=THINKING_BUDGET,
                 )
             except Exception as e:
@@ -107,7 +120,7 @@ class ReActAgent(BaseAgent):
 
                     logger.info(f"[REACT] tool_call: {tool_name}({_truncate_args(tool_input)})")
 
-                    result_text = await execute_tool(tool_name, tool_input, session_id)
+                    result_text = await execute_tool(tool_name, tool_input, session_id, user_id)
 
                     # Parse generate_document structured result
                     if tool_name == "generate_document":
@@ -198,6 +211,7 @@ class ReActAgent(BaseAgent):
         system: str,
         messages: list[dict],
         turn_id: str,
+        user_id: int = 0,
     ) -> AsyncGenerator[Union[str, dict, AgentResponse], None]:
         logger.info(f"[REACT] stream_execute session={session_id} turn={turn_id}")
 
@@ -212,7 +226,7 @@ class ReActAgent(BaseAgent):
                 stream = chat_completion_react_stream(
                     messages=messages,
                     system=system,
-                    tools=TOOLS,
+                    tools=self._get_all_tools(),
                     thinking_budget=THINKING_BUDGET,
                 )
             except Exception as e:
@@ -278,7 +292,7 @@ class ReActAgent(BaseAgent):
 
                     logger.info(f"[REACT] tool_call: {tool_name}({_truncate_args(tool_input)})")
 
-                    result_text = await execute_tool(tool_name, tool_input, session_id)
+                    result_text = await execute_tool(tool_name, tool_input, session_id, user_id)
 
                     # Parse generate_document structured result
                     if tool_name == "generate_document":

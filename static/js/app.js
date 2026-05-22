@@ -7,13 +7,47 @@ const state = {
   messages: [],           // current session messages
   streaming: false,
   uploadedDoc: null,      // { name, size } or null
+  token: '',              // auth token
+  userId: 0,
+  username: '',
 };
+
+// ─── Auth persistence ──────────────────────────────────
+function loadAuth() {
+  state.token = localStorage.getItem('lawagent_token') || '';
+  state.userId = parseInt(localStorage.getItem('lawagent_user_id') || '0', 10);
+  state.username = localStorage.getItem('lawagent_username') || '';
+}
+function saveAuth() {
+  localStorage.setItem('lawagent_token', state.token);
+  localStorage.setItem('lawagent_user_id', String(state.userId));
+  localStorage.setItem('lawagent_username', state.username);
+}
+function clearAuth() {
+  state.token = '';
+  state.userId = 0;
+  state.username = '';
+  localStorage.removeItem('lawagent_token');
+  localStorage.removeItem('lawagent_user_id');
+  localStorage.removeItem('lawagent_username');
+}
+
+// ─── Auth fetch wrapper ────────────────────────────────
+function authFetch(url, options = {}) {
+  const headers = options.headers || {};
+  if (state.token) {
+    headers['Authorization'] = `Bearer ${state.token}`;
+  }
+  return fetch(url, { ...options, headers });
+}
 
 // ─── DOM refs ─────────────────────────────────────────
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => document.querySelectorAll(sel);
 
 const dom = {
+  authView: $('#authView'),
+  appView: $('#appView'),
   sidebar: $('#sidebar'),
   overlay: $('#sidebarOverlay'),
   sessionList: $('#sessionList'),
@@ -28,6 +62,114 @@ const dom = {
   toast: $('#toast'),
 };
 
+// ─── View switching ────────────────────────────────────
+function showAuthView() {
+  dom.authView.style.display = 'flex';
+  dom.appView.style.display = 'none';
+}
+function showAppView() {
+  dom.authView.style.display = 'none';
+  dom.appView.style.display = 'flex';
+  // Update sidebar user info
+  const avatar = $('#sidebarAvatar');
+  if (avatar && state.username) avatar.textContent = state.username.slice(0, 2).toUpperCase();
+  const uname = $('#sidebarUsername');
+  if (uname) uname.textContent = state.username || 'LawAgent';
+}
+
+// ─── Auth functions ────────────────────────────────────
+async function handleLogin(e) {
+  e.preventDefault();
+  const username = $('#loginUsername').value.trim();
+  const password = $('#loginPassword').value;
+  const errEl = $('#loginError');
+  const btn = $('#loginBtn');
+
+  if (!username || !password) {
+    errEl.hidden = false; errEl.textContent = '请填写用户名和密码'; return;
+  }
+  btn.disabled = true; btn.textContent = '登录中...';
+  try {
+    const r = await fetch('/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password }),
+    });
+    const data = await r.json();
+    if (!r.ok) {
+      errEl.hidden = false; errEl.textContent = data.detail || '登录失败'; return;
+    }
+    state.token = data.token;
+    state.userId = data.user_id;
+    state.username = data.username;
+    saveAuth();
+    showAppView();
+    initApp();
+  } catch {
+    errEl.hidden = false; errEl.textContent = '无法连接服务器';
+  } finally {
+    btn.disabled = false; btn.textContent = '登录';
+  }
+}
+
+async function handleRegister(e) {
+  e.preventDefault();
+  const username = $('#regUsername').value.trim();
+  const password = $('#regPassword').value;
+  const errEl = $('#registerError');
+  const btn = $('#registerBtn');
+
+  if (username.length < 2 || username.length > 50) {
+    errEl.hidden = false; errEl.textContent = '用户名长度需在 2-50 个字符之间'; return;
+  }
+  if (password.length < 4 || password.length > 64) {
+    errEl.hidden = false; errEl.textContent = '密码长度需在 4-64 个字符之间'; return;
+  }
+  btn.disabled = true; btn.textContent = '注册中...';
+  try {
+    const r = await fetch('/api/auth/register', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password }),
+    });
+    const data = await r.json();
+    if (!r.ok) {
+      errEl.hidden = false; errEl.textContent = data.detail || '注册失败'; return;
+    }
+    state.token = data.token;
+    state.userId = data.user_id;
+    state.username = data.username;
+    saveAuth();
+    showAppView();
+    initApp();
+  } catch {
+    errEl.hidden = false; errEl.textContent = '无法连接服务器';
+  } finally {
+    btn.disabled = false; btn.textContent = '注册';
+  }
+}
+
+async function handleLogout() {
+  try {
+    await authFetch('/api/auth/logout', { method: 'POST' });
+  } catch { /* ignore */ }
+  clearAuth();
+  state.sessions = [];
+  state.activeId = null;
+  state.messages = [];
+  state.uploadedDoc = null;
+  showAuthView();
+}
+
+// ─── Tab switching on auth page ────────────────────────
+function switchAuthTab(tab) {
+  const isLogin = tab === 'login';
+  $('#loginForm').style.display = isLogin ? 'flex' : 'none';
+  $('#registerForm').style.display = isLogin ? 'none' : 'flex';
+  $$('.auth-tab').forEach(el => el.classList.toggle('active', el.dataset.tab === tab));
+  $$('.auth-error').forEach(el => { el.hidden = true; el.textContent = ''; });
+}
+
 // ─── Marked & Highlight config ────────────────────────
 marked.setOptions({ breaks: true, gfm: true });
 marked.use({
@@ -41,15 +183,19 @@ marked.use({
 });
 
 // ─── Sessions (localStorage) ───────────────────────────
+function sessionsKey() {
+  return `lawagent_sessions_${state.userId}`;
+}
+
 function loadSessions() {
   try {
-    state.sessions = JSON.parse(localStorage.getItem('lawagent_sessions') || '[]');
+    state.sessions = JSON.parse(localStorage.getItem(sessionsKey()) || '[]');
   } catch { state.sessions = []; }
   state.sessions.sort((a, b) => b.updatedAt - a.updatedAt);
 }
 
 function saveSessions() {
-  localStorage.setItem('lawagent_sessions', JSON.stringify(state.sessions));
+  localStorage.setItem(sessionsKey(), JSON.stringify(state.sessions));
 }
 
 function addSession(id, title) {
@@ -60,7 +206,6 @@ function addSession(id, title) {
   } else {
     state.sessions.unshift({ id, title: title || '新对话', updatedAt: Date.now() });
   }
-  // Keep max 50 sessions
   if (state.sessions.length > 50) state.sessions = state.sessions.slice(0, 50);
   saveSessions();
 }
@@ -83,9 +228,8 @@ async function deleteSession(id) {
     renderSessions();
     showWelcome();
   }
-  // 同步删除服务端 Redis + PostgreSQL
   try {
-    await fetch(`/api/session/${id}`, { method: 'DELETE' });
+    await authFetch(`/api/session/${id}`, { method: 'DELETE' });
   } catch (e) {
     console.warn('删除服务端会话失败:', e);
   }
@@ -105,7 +249,6 @@ function renderSessions() {
       </div>
     `).join('');
 
-  // Click handlers
   dom.sessionList.querySelectorAll('.session-item').forEach(el => {
     el.addEventListener('click', (e) => {
       if (e.target.closest('.btn-delete-session')) return;
@@ -129,9 +272,8 @@ async function switchSession(id) {
   dom.input.value = '';
   dom.input.style.height = 'auto';
 
-  // Load messages from API
   try {
-    const r = await fetch(`/api/session/${id}/history`);
+    const r = await authFetch(`/api/session/${id}/history`);
     if (r.ok) {
       const data = await r.json();
       state.messages = (data.messages || []).map(m => ({
@@ -158,8 +300,6 @@ async function switchSession(id) {
 // ─── Render messages ──────────────────────────────────
 function renderMessages() {
   dom.welcome.style.display = state.messages.length === 0 ? 'flex' : 'none';
-
-  // Remove existing message wrappers
   dom.messages.querySelectorAll('.msg-wrapper').forEach(el => el.remove());
 
   state.messages.forEach((m, i) => {
@@ -185,7 +325,7 @@ function createMessageElement(m, isLast) {
   bubble.className = 'message-bubble';
   bubble.innerHTML = m.role === 'ai' ? marked.parse(m.content) : `<p>${escapeHtml(m.content)}</p>`;
 
-  // Document download box (above the AI message bubble)
+  // Document download box
   if (m.role === 'ai' && m.metadata && m.metadata.download_url) {
     const dlRow = document.createElement('div');
     dlRow.className = 'refs-row';
@@ -207,7 +347,7 @@ function createMessageElement(m, isLast) {
     wrapper.appendChild(dlRow);
   }
 
-  // Thinking block (rendered inside AI bubble, collapsed by default)
+  // Thinking block
   if (m.role === 'ai' && m.thinking) {
     const thinkContainer = document.createElement('div');
     thinkContainer.className = 'thinking-final';
@@ -217,7 +357,7 @@ function createMessageElement(m, isLast) {
     const thinkBody = document.createElement('div');
     thinkBody.className = 'thinking-body';
     thinkBody.textContent = m.thinking;
-    thinkBody.style.display = 'none'; // collapsed by default
+    thinkBody.style.display = 'none';
     thinkHeader.addEventListener('click', () => {
       const collapsed = thinkBody.style.display === 'none';
       thinkBody.style.display = collapsed ? 'block' : 'none';
@@ -229,7 +369,7 @@ function createMessageElement(m, isLast) {
     bubble.appendChild(thinkContainer);
   }
 
-  // Tool summary (compact, below thinking)
+  // Tool summary
   if (m.role === 'ai' && m.toolsUsed && m.toolsUsed.length > 0) {
     const toolsRow = document.createElement('div');
     toolsRow.className = 'tools-final';
@@ -245,7 +385,7 @@ function createMessageElement(m, isLast) {
     bubble.appendChild(toolsRow);
   }
 
-  // Copy button for AI messages
+  // Copy button
   if (m.role === 'ai') {
     const actions = document.createElement('div');
     actions.className = 'msg-actions';
@@ -257,7 +397,7 @@ function createMessageElement(m, isLast) {
     bubble.appendChild(actions);
   }
 
-  // References box (above AI message, aligned with bubble)
+  // References box
   if (m.role === 'ai' && m.references && m.references.length > 0) {
     const refsRow = document.createElement('div');
     refsRow.className = 'refs-row';
@@ -275,7 +415,7 @@ function createMessageElement(m, isLast) {
   row.appendChild(bubble);
   wrapper.appendChild(row);
 
-  // Pipeline footer for AI messages
+  // Pipeline footer
   if (m.role === 'ai') {
     const pipeline = formatPipeline(m.metadata);
     if (pipeline) {
@@ -286,7 +426,6 @@ function createMessageElement(m, isLast) {
     }
   }
 
-  // Highlight code blocks
   bubble.querySelectorAll('pre code').forEach(block => {
     hljs.highlightElement(block);
   });
@@ -446,10 +585,9 @@ async function sendMessage(message) {
   if (state.streaming || !message.trim()) return;
   state.streaming = true;
 
-  // Ensure session exists
   if (!state.activeId) {
     try {
-      const r = await fetch('/api/session', { method: 'POST' });
+      const r = await authFetch('/api/session', { method: 'POST' });
       const data = await r.json();
       state.activeId = data.session_id;
       addSession(state.activeId, '新对话');
@@ -466,12 +604,10 @@ async function sendMessage(message) {
   dom.input.style.height = 'auto';
   dom.sendBtn.disabled = true;
 
-  // Add user message to UI
   state.messages.push({ role: 'user', content: message });
   appendMessageToDOM({ role: 'user', content: message });
   updateSessionTitle(state.activeId, message);
 
-  // Add streaming bubble
   const streamRow = createStreamingBubble();
   dom.messages.appendChild(streamRow);
   const streamBubble = $('#streamingBubble');
@@ -479,15 +615,15 @@ async function sendMessage(message) {
 
   let fullContent = '';
   let finalMeta = null;
+  let streamRefs = null;
   const STREAM_URL = `/api/chat/${state.activeId}/stream`;
 
-  // ReAct tracking
   let thinkingText = '';
   let thinkingBlock = null;
   let toolProgressEls = {};
 
   try {
-    const response = await fetch(STREAM_URL, {
+    const response = await authFetch(STREAM_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ message }),
@@ -506,9 +642,8 @@ async function sendMessage(message) {
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
 
-      // Process complete SSE events
       const lines = buffer.split('\n');
-      buffer = lines.pop() || ''; // keep incomplete line in buffer
+      buffer = lines.pop() || '';
 
       for (const line of lines) {
         if (!line.startsWith('data: ')) continue;
@@ -521,7 +656,6 @@ async function sendMessage(message) {
             streamBubble.innerHTML = '<div style="font-size:13px;color:#b0b0c0;padding:4px 0">📝 摘要中...</div>';
             continue;
           }
-          // ── Thinking ────────────────────────────
           if (data.type === 'thinking_delta') {
             thinkingText += data.thinking || '';
             if (!thinkingBlock) {
@@ -532,7 +666,6 @@ async function sendMessage(message) {
             scrollToBottom();
             continue;
           }
-          // ── Tool call ──────────────────────────
           if (data.status === 'tool_call') {
             const toolName = data.tool || '';
             const tp = createToolProgress(toolName, data.input || {});
@@ -541,7 +674,6 @@ async function sendMessage(message) {
             scrollToBottom();
             continue;
           }
-          // ── Tool result ────────────────────────
           if (data.status === 'tool_result') {
             const toolName = data.tool || '';
             const el = toolProgressEls[toolName];
@@ -551,12 +683,10 @@ async function sendMessage(message) {
             scrollToBottom();
             continue;
           }
-          // ── Refs ──────────────────────────────
           if (data.refs && data.refs.length > 0) {
             streamRefs = data.refs;
             continue;
           }
-          // ── Done ──────────────────────────────
           if (data.done) {
             finalMeta = data;
             if (data.content && !fullContent) {
@@ -577,7 +707,6 @@ async function sendMessage(message) {
           }
         } catch (e) {
           if (e.message === 'Stream error') throw e;
-          // Skip malformed JSON lines
         }
       }
     }
@@ -590,12 +719,10 @@ async function sendMessage(message) {
     dom.input.focus();
   }
 
-  // Fallback for empty response (model refused / content filtered)
   if (!fullContent) {
     fullContent = '抱歉，模型暂时无法回答，请换个方式提问。';
   }
 
-  // Replace streaming bubble with final rendered message
   const refs = finalMeta?.references || streamRefs || [];
   const toolsUsed = [];
   Object.entries(toolProgressEls).forEach(([name, el]) => {
@@ -615,11 +742,9 @@ async function sendMessage(message) {
   const finalEl = createMessageElement(aiMsg, true);
   streamRow.replaceWith(finalEl);
 
-  // Remove streaming temp elements — content is now in finalEl
   document.querySelectorAll('.thinking-block-stream, .tool-progress-stream').forEach(el => el.remove());
 
-  // Update session
-  addSession(state.activeId, null); // refresh time
+  addSession(state.activeId, null);
   renderSessions();
   scrollToBottom();
 }
@@ -640,7 +765,7 @@ function scrollToBottom() {
 async function uploadFile(file) {
   if (!state.activeId) {
     try {
-      const r = await fetch('/api/session', { method: 'POST' });
+      const r = await authFetch('/api/session', { method: 'POST' });
       const data = await r.json();
       state.activeId = data.session_id;
       addSession(state.activeId, '新对话');
@@ -648,7 +773,6 @@ async function uploadFile(file) {
     } catch { return; }
   }
 
-  // Show upload bar with parsing state immediately
   state.uploadedDoc = { name: file.name, size: file.size, parsing: true };
   updateUploadBar();
 
@@ -656,7 +780,7 @@ async function uploadFile(file) {
   form.append('file', file);
 
   try {
-    const r = await fetch(`/api/upload/${state.activeId}`, { method: 'POST', body: form });
+    const r = await authFetch(`/api/upload/${state.activeId}`, { method: 'POST', body: form });
     if (!r.ok) {
       const err = await r.json();
       state.uploadedDoc = null;
@@ -710,7 +834,7 @@ async function removeDocument() {
   updateUploadBar();
   if (state.activeId) {
     try {
-      await fetch(`/api/session/${state.activeId}/document`, { method: 'DELETE' });
+      await authFetch(`/api/session/${state.activeId}/document`, { method: 'DELETE' });
     } catch { /* ignore */ }
   }
   showToast('文档已移除');
@@ -950,6 +1074,18 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
+// ─── Auth event listeners ─────────────────────────────
+$('#loginForm').addEventListener('submit', handleLogin);
+$('#registerForm').addEventListener('submit', handleRegister);
+$('#btnLogout').addEventListener('click', () => {
+  if (confirm('确定要登出吗？')) handleLogout();
+});
+
+// Auth tab switching
+$$('.auth-tab').forEach(tab => {
+  tab.addEventListener('click', () => switchAuthTab(tab.dataset.tab));
+});
+
 // ─── Dark Mode ─────────────────────────────────────────
 const HL_LIGHT = 'https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css';
 const HL_DARK  = 'https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css';
@@ -977,12 +1113,35 @@ function toggleTheme() {
 
 $('#btnTheme').addEventListener('click', toggleTheme);
 
-// ─── Init ─────────────────────────────────────────────
-applyTheme(getTheme());
-loadSessions();
-renderSessions();
-
-// If there are sessions, auto-load the latest
-if (state.sessions.length > 0) {
-  switchSession(state.sessions[0].id);
+// ─── Init App (after auth) ─────────────────────────────
+function initApp() {
+  applyTheme(getTheme());
+  loadSessions();
+  renderSessions();
+  if (state.sessions.length > 0) {
+    switchSession(state.sessions[0].id);
+  }
 }
+
+// ─── Startup: check auth token ─────────────────────────
+async function checkAuth() {
+  loadAuth();
+  if (!state.token) {
+    showAuthView();
+    return;
+  }
+  // Verify token is still valid
+  try {
+    const r = await authFetch('/api/auth/me');
+    if (r.ok) {
+      showAppView();
+      initApp();
+      return;
+    }
+  } catch { /* ignore */ }
+  // Token invalid or expired
+  clearAuth();
+  showAuthView();
+}
+
+checkAuth();

@@ -10,16 +10,18 @@ def save_session_memory(
     state: str = "idle",
     has_document: bool = False,
     document_name: str | None = None,
+    user_id: int | None = None,
 ):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
             cur.execute(
                 """INSERT INTO session_memory
-                   (session_id, short_term_memory, summary_list, window_token_count,
+                   (session_id, user_id, short_term_memory, summary_list, window_token_count,
                     state, has_document, document_name, updated_at)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, NOW())
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW())
                    ON CONFLICT (session_id) DO UPDATE SET
+                    user_id = COALESCE(EXCLUDED.user_id, session_memory.user_id),
                     short_term_memory = EXCLUDED.short_term_memory,
                     summary_list = EXCLUDED.summary_list,
                     window_token_count = EXCLUDED.window_token_count,
@@ -29,6 +31,7 @@ def save_session_memory(
                     updated_at = NOW()""",
                 (
                     session_id,
+                    user_id,
                     json.dumps(short_term_memory, ensure_ascii=False),
                     json.dumps(summary_list, ensure_ascii=False),
                     window_token_count,
@@ -42,17 +45,26 @@ def save_session_memory(
         put_conn(conn)
 
 
-def get_session_memory(session_id: str) -> dict | None:
+def get_session_memory(session_id: str, user_id: int | None = None) -> dict | None:
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute(
-                """SELECT short_term_memory, summary_list, window_token_count,
-                          state, has_document, document_name
-                   FROM session_memory
-                   WHERE session_id = %s""",
-                (session_id,),
-            )
+            if user_id is not None:
+                cur.execute(
+                    """SELECT short_term_memory, summary_list, window_token_count,
+                              state, has_document, document_name
+                       FROM session_memory
+                       WHERE session_id = %s AND user_id = %s""",
+                    (session_id, user_id),
+                )
+            else:
+                cur.execute(
+                    """SELECT short_term_memory, summary_list, window_token_count,
+                              state, has_document, document_name
+                       FROM session_memory
+                       WHERE session_id = %s""",
+                    (session_id,),
+                )
             row = cur.fetchone()
             if row is None:
                 return None

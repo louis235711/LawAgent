@@ -10,6 +10,37 @@
 </head>
 <body>
 
+<!-- Auth View -->
+<div class="auth-view" id="authView">
+  <div class="auth-container">
+    <div class="auth-header">
+      <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#6c5ce7" stroke-width="1.5" stroke-linecap="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+      <h1>LawAgent</h1>
+      <p>智能法律助手</p>
+    </div>
+    <div class="auth-tabs">
+      <button class="auth-tab active" data-tab="login">登录</button>
+      <button class="auth-tab" data-tab="register">注册</button>
+    </div>
+    <form class="auth-form" id="loginForm">
+      <div class="auth-error" id="loginError" hidden></div>
+      <input type="text" class="auth-input" id="loginUsername" placeholder="用户名" autocomplete="username" maxlength="50">
+      <input type="password" class="auth-input" id="loginPassword" placeholder="密码" autocomplete="current-password" maxlength="64">
+      <button type="submit" class="auth-btn" id="loginBtn">登录</button>
+    </form>
+    <form class="auth-form" id="registerForm" style="display:none">
+      <div class="auth-error" id="registerError" hidden></div>
+      <input type="text" class="auth-input" id="regUsername" placeholder="用户名（2-50 字符，字母数字下划线连字符）" autocomplete="username" maxlength="50">
+      <input type="password" class="auth-input" id="regPassword" placeholder="密码（4-64 字符）" autocomplete="new-password" maxlength="64">
+      <button type="submit" class="auth-btn" id="registerBtn">注册</button>
+    </form>
+    <p class="auth-hint">注册即表示您同意仅将本工具用于合法用途</p>
+  </div>
+</div>
+
+<!-- App View -->
+<div class="app-view" id="appView" style="display:none">
+
 <div class="sidebar-overlay" id="sidebarOverlay"></div>
 
 <aside class="sidebar" id="sidebar">
@@ -21,10 +52,13 @@
   </div>
   <nav class="session-list" id="sessionList"></nav>
   <div class="sidebar-footer">
-    <div class="user-info">
-      <div class="avatar">LA</div>
-      <span>LawAgent</span>
+    <div class="user-info" id="sidebarUser">
+      <div class="avatar" id="sidebarAvatar">LA</div>
+      <span id="sidebarUsername">LawAgent</span>
     </div>
+    <button class="btn-logout" id="btnLogout" title="登出">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+    </button>
   </div>
 </aside>
 
@@ -47,7 +81,7 @@
         <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#7c7c9a" stroke-width="1.5" stroke-linecap="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
       </div>
       <h2>LawAgent 智能法律助手</h2>
-      <p class="welcome-sub">多智能体架构 · 法律咨询 · 案情分析 · 合同审查 · 文书撰写</p>
+      <p class="welcome-sub">ReAct Agent · 法律咨询 · 案情分析 · 合同审查 · 文书撰写</p>
       <div class="quick-actions">
         <button class="quick-btn" data-prompt="借钱不还怎么处理？">借钱不还怎么处理？</button>
         <button class="quick-btn" data-prompt="劳动仲裁需要什么材料？">劳动仲裁需要什么材料？</button>
@@ -84,6 +118,8 @@
 </main>
 
 <div class="toast" id="toast" hidden></div>
+
+</div><!-- /app-view -->
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>

@@ -1,4 +1,5 @@
 import uuid
+import time
 from src.config import settings
 from src.database.redis import get_session, update_session, create_session
 from src.database.message_repo import save_message as pg_save_message
@@ -8,7 +9,8 @@ from loguru import logger
 
 SUMMARY_MAX_LEN = 20
 SUMMARY_OUTPUT_TOKENS = 2048
-KEEP_RECENT_TURNS = 2  # keep last N turns intact (full ReAct trajectory)
+KEEP_RECENT_TURNS = 3  # tier 1: keep last N turns intact (full ReAct trajectory)
+MAX_TURNS = 20          # tier 3+: compress turns beyond this
 
 SUMMARY_PROMPT = """请对以下对话轮次进行摘要。每轮包含用户问题、AI思考过程、工具调用和结果、最终回答。
 
@@ -22,6 +24,21 @@ SUMMARY_PROMPT = """请对以下对话轮次进行摘要。每轮包含用户问
 
 {history}
 """
+
+AGGREGATE_PROMPT = """请将以下连续对话轮次按主题聚合为一个精简轮次。
+
+## 要求
+1. 用户输入：合并所有用户问题为一段连贯描述
+2. 最终回答：合并所有AI回答的关键结论，去除重复，保留法条引用（法律名+条款号）
+3. 不输出thinking、工具调用细节
+
+## 原始轮次
+{turns_data}
+
+## 输出格式
+第一行：用户问题汇总（一段话）
+第二行：---
+第三行：AI回答汇总（保留法条引用的完整段落）"""
 
 CONTEXT_INSTRUCTION = (
     "【重要提示】以下消息分为多个部分：\n"
@@ -41,6 +58,7 @@ def new_turn_id() -> str:
 # ── Memory entry (enhanced structure) ────────────────────────
 
 async def add_memory_entry(
+    user_id: int,
     session_id: str,
     role: str,
     content: str,
@@ -50,9 +68,9 @@ async def add_memory_entry(
     message_type: str = "咨询",
 ) -> int:
     """Append a structured memory entry to short-term memory and PostgreSQL."""
-    data = await get_session(session_id)
+    data = await get_session(user_id, session_id)
     if data is None:
-        data = await create_session(session_id)
+        data = await create_session(user_id, session_id)
 
     token_count = count_tokens(content)
     msg = {
@@ -67,13 +85,15 @@ async def add_memory_entry(
 
     data["short_term_memory"].append(msg)
     data["window_token_count"] = _calc_window_tokens(data)
-    await update_session(session_id, **data)
+    data["last_active_at"] = int(time.time())
+    await update_session(user_id, session_id, **data)
 
     pg_save_message(session_id, role, content, token_count, message_type)
     return token_count
 
 
 async def save_turn(
+    user_id: int,
     session_id: str,
     turn_id: str,
     entries: list[dict],
@@ -82,9 +102,9 @@ async def save_turn(
 
     entries: list of {role, content, step_type, tool_name?}
     """
-    data = await get_session(session_id)
+    data = await get_session(user_id, session_id)
     if data is None:
-        data = await create_session(session_id)
+        data = await create_session(user_id, session_id)
 
     for entry in entries:
         # user_input already saved to Redis by add_memory_entry — skip to avoid duplicates
@@ -103,7 +123,7 @@ async def save_turn(
         data["short_term_memory"].append(msg)
 
     data["window_token_count"] = _calc_window_tokens(data)
-    await update_session(session_id, **data)
+    await update_session(user_id, session_id, **data)
 
     # Persist final answer to PostgreSQL (user_input already saved by add_memory_entry)
     for entry in entries:
@@ -124,6 +144,7 @@ async def save_turn(
 # ── Backward-compatible add_message ──────────────────────────
 
 async def add_message(
+    user_id: int,
     session_id: str,
     role: str,
     content: str,
@@ -135,7 +156,7 @@ async def add_message(
     turn_id = new_turn_id()
     step_type = "user_input" if role == "user" else "final_answer"
     return await add_memory_entry(
-        session_id, role, content, turn_id, step_type,
+        user_id, session_id, role, content, turn_id, step_type,
         message_type=message_type,
     )
 
@@ -143,6 +164,7 @@ async def add_message(
 # ── Anthropic context assembly ───────────────────────────────
 
 async def assemble_anthropic_context(
+    user_id: int,
     session_id: str,
     system_prompt: str,
     current_input: str,
@@ -152,9 +174,9 @@ async def assemble_anthropic_context(
     Converts Redis memory entries to Anthropic content-block format.
     Preserves thinking blocks for round-tripping (required by DeepSeek).
     """
-    data = await get_session(session_id)
+    data = await get_session(user_id, session_id)
     if data is None:
-        data = await create_session(session_id)
+        data = await create_session(user_id, session_id)
 
     system = system_prompt + "\n\n" + CONTEXT_INSTRUCTION
 
@@ -366,86 +388,132 @@ def _turn_to_anthropic_messages(turn: list[dict]) -> list[dict]:
     return messages
 
 
-# ── Summarization (turn-based) ───────────────────────────────
+# ── Multi-tier turn compression ──────────────────────────────
 
-async def check_and_summarize(session_id: str) -> bool:
-    """Check if summarization needed. Group by turn, compress oldest turns first.
+async def check_and_summarize(user_id: int, session_id: str) -> bool:
+    """Multi-tier turn compression after each turn.
 
-    Thinking blocks are prioritized for discard (compressed to one-sentence summary).
+    Tier 1 (recent 3 turns): full ReAct trajectory
+    Tier 2 (turns 4-10):     strip thinking entries
+    Tier 3 (turns 10-20):    LLM summary per turn
+    Tier 4 (turns 20+):      aggregate 10 oldest turns into 1
     """
-    data = await get_session(session_id)
+    data = await get_session(user_id, session_id)
     if data is None:
-        return False
-
-    window_tokens = data.get("window_token_count", 0)
-    threshold = int(settings.max_context_tokens * settings.summary_trigger_ratio)
-
-    if window_tokens < threshold:
         return False
 
     memory = data.get("short_term_memory", [])
     turns = _group_by_turn(memory)
+    total = len(turns)
 
-    if len(turns) <= KEEP_RECENT_TURNS:
+    if total <= KEEP_RECENT_TURNS:
         return False
 
-    # Calculate how many oldest turns to summarize
-    turns_to_keep = turns[-KEEP_RECENT_TURNS:]
-    turns_candidates = turns[:-KEEP_RECENT_TURNS]
+    changed = False
 
-    cumulative = 0
-    take = 0
-    min_batch = settings.min_batch_tokens
+    # ── Tier 4: aggregate oldest 10 turns into 1 ──
+    if total > MAX_TURNS:
+        oldest = turns[:10]
+        remaining = turns[10:]
+        formatted = _format_turns_for_summary(oldest)
+        try:
+            result = await chat_completion(
+                messages=[{"role": "user", "content": AGGREGATE_PROMPT.format(turns_data=formatted)}],
+                temperature=0.3,
+                max_tokens=1024,
+            )
+            agg_turn_id = new_turn_id()
+            parts = result.strip().split("\n---\n", 1)
+            user_text = parts[0].strip() if parts else result.strip()
+            answer_text = parts[1].strip() if len(parts) > 1 else ""
+            agg_turn = [
+                {"role": "user", "content": user_text, "token_count": count_tokens(user_text),
+                 "turn_id": agg_turn_id, "step_type": "user_input"},
+            ]
+            if answer_text:
+                agg_turn.append(
+                    {"role": "ai", "content": answer_text, "token_count": count_tokens(answer_text),
+                     "turn_id": agg_turn_id, "step_type": "final_answer"},
+                )
+            turns = agg_turn if not remaining else [agg_turn] + remaining
+            changed = True
+            logger.info(f"[MEM] aggregated 10 oldest turns → 1 (session={session_id})")
+        except Exception as e:
+            logger.error(f"Turn aggregation failed: {e}")
 
-    for i, turn in enumerate(turns_candidates):
-        turn_tokens = sum(msg.get("token_count", 0) for msg in turn)
-        cumulative += turn_tokens
-        take = i + 1
-        if cumulative >= min_batch:
-            break
+    # ── Tier 3: summarize turns 10-20 from end ──
+    total = len(turns)
+    if total > MAX_TURNS:
+        to_summarize = turns[:total - MAX_TURNS]
+        to_keep = turns[total - MAX_TURNS:]
+        formatted = _format_turns_for_summary(to_summarize)
+        try:
+            summary = await chat_completion(
+                messages=[{"role": "user", "content": SUMMARY_PROMPT.format(history=formatted)}],
+                temperature=0.3,
+                max_tokens=SUMMARY_OUTPUT_TOKENS,
+            )
+            summary_list = data.get("summary_list", [])
+            summary_list.append(summary)
+            if len(summary_list) > SUMMARY_MAX_LEN:
+                summary_list.pop(0)
+            data["summary_list"] = summary_list
 
-    if take == 0:
-        return False
+            # Store to Milvus (fire-and-forget)
+            _store_summary_to_milvus(user_id, session_id, summary)
 
-    turns_to_summarize = turns_candidates[:take]
-    remaining_turns = turns_candidates[take:] + turns_to_keep
+            turns = to_keep
+            changed = True
+            logger.info(f"[MEM] summarized {len(to_summarize)} turns → summary #{len(summary_list)} (session={session_id})")
+        except Exception as e:
+            logger.error(f"Turn summarization failed: {e}")
 
-    # Format turns for summarization (thinking truncated, observations summarized)
-    formatted = _format_turns_for_summary(turns_to_summarize)
-    prompt = SUMMARY_PROMPT.format(history=formatted)
+    # ── Tier 2: strip thinking from turns 4-10 from end ──
+    total = len(turns)
+    if total > KEEP_RECENT_TURNS:
+        tier2_end = max(KEEP_RECENT_TURNS, total - 10)
+        for i in range(KEEP_RECENT_TURNS, tier2_end):
+            original_len = len(turns[i])
+            turns[i] = [m for m in turns[i] if m.get("step_type") != "thinking"]
+            if len(turns[i]) < original_len:
+                changed = True
 
+    if changed:
+        new_memory = []
+        for turn in turns:
+            new_memory.extend(turn)
+        data["short_term_memory"] = new_memory
+        data["window_token_count"] = _calc_window_tokens(data)
+        await update_session(user_id, session_id, **data)
+
+    return changed
+
+
+def _store_summary_to_milvus(user_id: int, session_id: str, summary: str):
+    """Store structured summary to Milvus session_memory (non-blocking)."""
     try:
-        summary = await chat_completion(
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.3,
-            max_tokens=SUMMARY_OUTPUT_TOKENS,
-        )
+        import asyncio
+        from src.vector_db.milvus_client import get_collection, SESSION_MEMORY_COLLECTION
+        from src.llm.embedding import embed_text
+
+        async def _do_store():
+            vec = await embed_text(summary[:2000])
+            coll = get_collection(SESSION_MEMORY_COLLECTION)
+            coll.insert([{
+                "user_id": user_id,
+                "session_id": session_id,
+                "summary_text": summary[:65000],
+                "topic": "",
+                "turn_range": "",
+                "created_at": int(time.time()),
+                "vector": vec,
+            }])
+            coll.flush()
+
+        loop = asyncio.get_running_loop()
+        loop.create_task(_do_store())
     except Exception as e:
-        logger.error(f"Summary generation failed: {e}")
-        return False
-
-    summary_list = data.get("summary_list", [])
-    summary_list.append(summary)
-    if len(summary_list) > SUMMARY_MAX_LEN:
-        summary_list.pop(0)
-
-    # Flatten remaining turns back to memory entries
-    new_memory = []
-    for turn in remaining_turns:
-        new_memory.extend(turn)
-
-    data["summary_list"] = summary_list
-    data["short_term_memory"] = new_memory
-    data["window_token_count"] = _calc_window_tokens(data)
-    await update_session(session_id, **data)
-    logger.info(f"[MEM] session {session_id}: summarized {take} turns ({cumulative} tokens) → "
-                f"summary #{len(summary_list)}, {len(remaining_turns)} turns kept, "
-                f"window={data['window_token_count']} tokens")
-
-    # Fire-and-forget long-term memory update
-    from src.memory.long_term import schedule_memory_update
-    schedule_memory_update(formatted)
-    return True
+        logger.warning(f"[MEM] failed to store summary to Milvus: {e}")
 
 
 def _format_turns_for_summary(turns: list[list[dict]]) -> str:
@@ -481,14 +549,15 @@ def _format_turns_for_summary(turns: list[list[dict]]) -> str:
 # ── Legacy context assembly (backward compat) ────────────────
 
 async def assemble_context(
+    user_id: int,
     session_id: str,
     system_prompt: str,
     current_prompt: str,
 ) -> list[dict]:
     """Legacy context assembly for old agents. Returns OpenAI-format messages."""
-    data = await get_session(session_id)
+    data = await get_session(user_id, session_id)
     if data is None:
-        data = await create_session(session_id)
+        data = await create_session(user_id, session_id)
 
     system_content = system_prompt + "\n\n" + CONTEXT_INSTRUCTION
     messages = [{"role": "system", "content": system_content}]
@@ -553,15 +622,15 @@ def _step_type_to_message_type(step_type: str, tool_name: str) -> str:
     return "其他"
 
 
-def get_short_term_memory(session_id: str) -> list[dict]:
+def get_short_term_memory(user_id: int, session_id: str) -> list[dict]:
     """Legacy compatibility."""
     import asyncio
     loop = asyncio.get_event_loop()
-    return loop.run_until_complete(_get_memory_async(session_id))
+    return loop.run_until_complete(_get_memory_async(user_id, session_id))
 
 
-async def _get_memory_async(session_id: str) -> list[dict]:
-    data = await get_session(session_id)
+async def _get_memory_async(user_id: int, session_id: str) -> list[dict]:
+    data = await get_session(user_id, session_id)
     if data is None:
         return []
     return data.get("short_term_memory", [])

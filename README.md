@@ -1,6 +1,6 @@
 # LawAgent
 
-多智能体架构法务智能服务系统 —— 一站式法律 AI 助手。
+ReAct Agent 法务智能服务系统 —— 一站式法律 AI 助手。
 
 ## 功能概览
 
@@ -13,7 +13,7 @@
 | 文书撰写 | LLM 生成法律文书，支持 pdf/docx/md/txt 导出，PDF 排版美观适合打印，前端一键下载 |
 | 追问/聊天 | 多轮对话上下文维护 + 长期用户偏好记忆，不触发新检索 |
 
-**安全机制**：所有用户输入先经合规检测（合法 / 无关 / 违规），违规内容直接拦截。
+**安全机制**：所有用户输入先经合规检测（合法 / 违规），违规内容直接拦截。
 
 ## 系统架构
 
@@ -36,18 +36,22 @@
 |---|---|
 | 语言 | Python 3.10+ |
 | API 框架 | FastAPI + Uvicorn |
+| Agent 框架 | ReAct（thinking + tool_use 循环，无 LangChain，自研） |
 | 前端 | 纯静态 HTML/CSS/JS（marked.js + highlight.js + SSE 流式） |
-| 关系型数据库 | PostgreSQL 16（对话消息 + 元数据持久化） |
+| 关系型数据库 | PostgreSQL 16（对话消息 + 会话记忆） |
 | 缓存/会话 | Redis 7（短期记忆 + 会话状态） |
 | 向量数据库 | Milvus 2.4（法律知识库 + 会话文档向量） |
-| LLM | DeepSeek-V4 |
+| LLM | DeepSeek-V4（OpenAI / Anthropic 双 SDK 接入） |
 | Embedding | DashScope text-embedding-v4 (1024维) |
-| Rerank | DashScope qwen3-rerank |
+| Rerank | DashScope gte-rerank-v2 |
 | OCR | PaddleOCR (Docker 服务) |
-| 文档解析 | python-docx / openpyxl / PaddleOCR |
-| 文档生成 | python-docx / wkhtmltopdf + pdfkit（PDF 渲染） |
+| 文档解析 | PyMuPDF / python-docx / openpyxl / PaddleOCR |
+| 文档生成 | python-docx / wkhtmltopdf + pdfkit / markdown |
 | 联网搜索 | Tavily API |
+| Token 计数 | tiktoken |
 | 分词 | jieba（BM25 检索） |
+| 配置管理 | pydantic-settings |
+| 日志 | loguru |
 | 容器化 | Docker + docker-compose |
 
 ## 快速开始
@@ -61,8 +65,14 @@
 ### 2. 启动基础服务
 
 ```bash
+# 先启动 OCR 服务
+docker-compose up -d ocr
+
+# 启动数据库和存储
 docker-compose up -d postgres redis etcd minio milvus
 ```
+
+> **PDF 生成**：需要安装 wkhtmltopdf，下载地址 https://wkhtmltopdf.org/downloads.html，安装后确保 `wkhtmltopdf` 在 PATH 中。首次生成 PDF 时程序会自动复制系统字体。
 
 ### 3. 安装依赖
 
@@ -166,7 +176,6 @@ LawAgent/
 │   ├── templates/           # 文书模板
 │   ├── uploads/             # 用户上传文档
 │   ├── generated/           # AI 生成文书
-│   ├── memory.md            # 用户长期偏好记忆
 │   └── test/                # 测试文件
 ├── tests/                   # 集成测试（27 用例）
 ├── memory-bank/             # 设计文档 / 技术栈 / 实施计划

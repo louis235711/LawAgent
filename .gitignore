@@ -46,5 +46,5 @@ data/generated/*
 # 字体文件（运行时从系统复制）
 data/fonts/
 
-# 内存文件
-memory/
+# 内存文件（用户偏好数据）
+/data/memory/

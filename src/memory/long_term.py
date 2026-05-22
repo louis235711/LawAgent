@@ -48,10 +48,10 @@ MERGE_PROMPT = """你是用户偏好记录管理助手。请将新旧记录合�
 ## 合并后的记录"""
 
 
-def load_long_term_memory() -> str:
-    """Read both feedback_style and user_role, return concatenated for system prompt."""
+def load_long_term_memory(user_id: int) -> str:
+    """Read both feedback_style and user_role for a user, return concatenated for system prompt."""
     parts = []
-    for path in [settings.feedback_style_path, settings.user_role_path]:
+    for path in settings.memory_paths_for_user(user_id):
         if os.path.isfile(path):
             try:
                 with open(path, "r", encoding="utf-8") as f:
@@ -158,8 +158,8 @@ async def _append_and_dedup(file_path: str, new_items: str):
         _save_file(file_path, combined)
 
 
-async def update_long_term_memory(conversation_text: str):
-    """Extract preferences from conversation and append to feedback_style.md / user_role.md.
+async def update_long_term_memory(conversation_text: str, user_id: int):
+    """Extract preferences from conversation and append to user-specific memory files.
 
     Append strategy: new items are added to existing files.
     LLM deduplication only triggers when a file exceeds the threshold.
@@ -168,25 +168,27 @@ async def update_long_term_memory(conversation_text: str):
     if not conversation_text.strip():
         return
 
+    fb_path, role_path = settings.memory_paths_for_user(user_id)
+
     try:
         feedback, role = await _extract_preferences(conversation_text)
 
         # Filter out "无" — the LLM's way of saying "no info"
         if feedback and feedback != "无":
-            await _append_and_dedup(settings.feedback_style_path, feedback)
+            await _append_and_dedup(fb_path, feedback)
         if role and role != "无":
-            await _append_and_dedup(settings.user_role_path, role)
+            await _append_and_dedup(role_path, role)
     except Exception as e:
-        logger.error(f"Long-term memory update failed: {e}")
+        logger.error(f"Long-term memory update failed for user {user_id}: {e}")
 
 
-def schedule_memory_update(conversation_text: str):
+def schedule_memory_update(conversation_text: str, user_id: int):
     """Fire-and-forget wrapper: schedule memory update without blocking the caller."""
     if not conversation_text.strip():
         return
 
     async def _run():
-        await update_long_term_memory(conversation_text)
+        await update_long_term_memory(conversation_text, user_id)
 
     try:
         loop = asyncio.get_running_loop()

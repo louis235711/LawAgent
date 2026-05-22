@@ -30,10 +30,10 @@ async def test_security(client):
     blocked = d["metadata"].get("blocked", False)
     record("违规输入被拦截，返回固定提示", blocked, d["content"][:80])
 
-    # 无关输入被拦截
+    # 法律无关输入被识别为违规并拦截
     r = await client.post(f"{BASE}/api/chat/{sid}", json={"message": "今天天气真好"})
     d = r.json()
-    record("无关输入被拦截，返回固定提示", d["metadata"].get("blocked", False))
+    record("法律无关输入被识别为违规并拦截", d["metadata"].get("blocked", False) and d["metadata"].get("reason") == "违规")
 
     # 合法法律问题正常通过
     r = await client.post(f"{BASE}/api/chat/{sid}", json={"message": "如何起诉离婚？"})

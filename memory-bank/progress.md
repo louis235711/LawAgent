@@ -966,7 +966,7 @@ case "delta":
 ### 步骤 26：端到端集成测试 ✅
 
 - 编写 `tests/integration_test.py`（27 个测试用例，覆盖全部 6 类验收标准 + 边界情况）
-- 安全模块 5/5：违规拦截、无关拦截、合法通过、寒暄合法、越狱识别
+- 安全模块 5/5：违规拦截、无关内容违规拦截、合法通过、寒暄合法、越狱识别
 - 法律咨询 4/4：RAG 检索 + 法条引用、追问不触发新 Agent
 - 案情分析 4/4：结构化报告、法条+建议、类案搜索
 - 文档处理 4/4：PDF 解析+分块+入库、文档问答、合同审查、has_document 标记
@@ -1091,8 +1091,8 @@ case "delta":
 ### 步骤 8：实现安全检测模块 ✅
 
 - 实现 `src/security/guard.py`（固定合规检测 Prompt + DeepSeek API）
-- 三分类：合法/无关/违规，兜底规则：非预期输出按合法处理
-- **验证**：5 个测试用例全部通过（合法×2、无关×2、违规×1）
+- 二分类：合法/违规，无关内容归入违规，兜底规则：非预期输出按合法处理
+- **验证**：5 个测试用例全部通过（合法×2、违规×3）
 
 ### 步骤 7：实现 Token 计数工具 ✅
 
@@ -1103,7 +1103,7 @@ case "delta":
 ### 步骤 6：实现 Embedding 和 Rerank 客户端 ✅
 
 - 实现 `src/llm/embedding.py`（DashScope text-embedding-v4，1024 维）
-- 实现 `src/llm/rerank.py`（DashScope qwen3-rerank）
+- 实现 `src/llm/rerank.py`（DashScope gte-rerank-v2）
 - 均支持批量输入 + 重试机制
 - **验证**：embedding 返回 2×1024 向量；rerank 将法律文档排在前列
 

@@ -5,7 +5,7 @@ from src.vector_db.milvus_client import (
     LEGAL_KNOWLEDGE_COLLECTION,
     SESSION_DOCUMENTS_COLLECTION,
 )
-from src.rag.bm25 import get_legal_bm25, build_legal_bm25, get_session_bm25, ensure_session_bm25
+from src.rag.bm25 import get_legal_bm25, build_legal_bm25, get_session_bm25, ensure_session_bm25, get_memory_bm25, build_memory_bm25
 from src.rag.query_rewriter import rewrite_query
 from loguru import logger
 
@@ -344,3 +344,172 @@ async def retrieve_session_docs(
         }
         for r in reranked
     ]
+
+
+async def retrieve_session_memory(
+    query: str,
+    user_id: int,
+    top_k: int = 5,
+) -> list[dict]:
+    """Hybrid retrieval for session memory (long-term structured summaries).
+
+    Searches across all of a user's past session summaries stored in Milvus.
+    Filters out expired entries (older than 7 days). Renews on hit.
+    """
+    import time
+    from src.vector_db.milvus_client import get_collection, SESSION_MEMORY_COLLECTION
+
+    now = int(time.time())
+    ttl_seconds = 7 * 24 * 3600
+    min_created_at = now - ttl_seconds
+
+    # Ensure BM25 index is built
+    await ensure_memory_bm25(user_id)
+
+    query_vec = (await embed_texts([query]))[0]
+
+    # 1. Vector search
+    coll = get_collection(SESSION_MEMORY_COLLECTION)
+    search_params = {"metric_type": "COSINE", "params": {"nprobe": 16}}
+
+    vec_results = coll.search(
+        data=[query_vec],
+        anns_field="vector",
+        param=search_params,
+        limit=top_k * 3,
+        expr=f'user_id == {user_id} and created_at > {min_created_at}',
+        output_fields=["summary_text", "session_id", "topic", "created_at"],
+    )
+    vec_hits = vec_results[0]
+    logger.debug(f"[RAG:MEM:VEC] hits: {len(vec_hits)}")
+
+    # 2. BM25 search
+    bm25 = get_memory_bm25(user_id)
+    bm25_results = bm25.search(query, top_k=top_k * 3) if bm25 else []
+    logger.debug(f"[RAG:MEM:BM25] hits: {len(bm25_results)}")
+
+    if not vec_hits and not bm25_results:
+        return []
+
+    # 3. RRF fusion
+    vec_indices = [(hit.id, hit.distance) for hit in vec_hits]
+    fused_indices = _rrf_fusion(vec_indices, bm25_results, top_k=top_k * 3)
+
+    # 4. Build document list (deduplicated)
+    id_to_hit = {hit.id: hit for hit in vec_hits}
+    bm25_docs: dict[int, str] = {}
+    for doc_idx, _ in bm25_results:
+        if bm25 and doc_idx < len(bm25.documents):
+            bm25_docs[doc_idx] = bm25.documents[doc_idx]
+
+    documents = []
+    doc_sources = []
+    seen: set[str] = set()
+    for idx in fused_indices:
+        hit = id_to_hit.get(idx)
+        if hit:
+            text = hit.entity.get("summary_text") or ""
+            if text and text not in seen:
+                seen.add(text)
+                documents.append(text)
+                doc_sources.append(hit)
+        elif idx in bm25_docs:
+            text = bm25_docs[idx]
+            if text and text not in seen:
+                seen.add(text)
+                documents.append(text)
+                doc_sources.append(bm25.get_meta(idx) if bm25 else {})
+
+    if not documents:
+        return []
+
+    # 5. Rerank
+    reranked = await rerank(query, documents, top_k=top_k)
+    reranked = [r for r in reranked if r["relevance_score"] >= 0.3]
+
+    # 6. Build results + renew TTL on hit
+    results = []
+    renew_ids = []
+    for r in reranked:
+        idx = r["index"]
+        source = doc_sources[idx]
+        if hasattr(source, "entity"):
+            text = source.entity.get("summary_text") or documents[idx]
+            session_id = source.entity.get("session_id", "")
+            topic = source.entity.get("topic", "")
+            renew_ids.append(source.id)
+        else:
+            text = documents[idx]
+            session_id = ""
+            topic = ""
+        results.append({
+            "chunk_text": text,
+            "score": r["relevance_score"],
+            "session_id": session_id,
+            "topic": topic,
+        })
+
+    # Renew TTL on hit entries (fire-and-forget)
+    if renew_ids:
+        _renew_memory_ttl(coll, renew_ids, now)
+
+    logger.info(f"[RAG:MEM] done: {len(results)} results for user={user_id}")
+    return results
+
+
+def _renew_memory_ttl(coll, doc_ids: list[int], now: int):
+    """Update created_at to renew TTL on accessed memory entries."""
+    try:
+        for doc_id in doc_ids:
+            coll.update(
+                expr=f"id == {doc_id}",
+                data=[{"created_at": now}],
+            )
+    except Exception as e:
+        logger.warning(f"[RAG:MEM] TTL renewal failed: {e}")
+
+
+async def ensure_memory_bm25(user_id: int):
+    """Build or recover BM25 index for a user's session memory."""
+    from src.vector_db.milvus_client import get_collection, SESSION_MEMORY_COLLECTION
+    import time
+
+    existing = get_memory_bm25(user_id)
+    if existing is not None:
+        return
+
+    ttl_seconds = 7 * 24 * 3600
+    min_created_at = int(time.time()) - ttl_seconds
+
+    try:
+        coll = get_collection(SESSION_MEMORY_COLLECTION)
+        offset = 0
+        batch = 500
+        chunks = []
+        meta = []
+        while True:
+            results = coll.query(
+                expr=f'user_id == {user_id} and created_at > {min_created_at}',
+                output_fields=["summary_text", "topic", "session_id"],
+                limit=batch,
+                offset=offset,
+            )
+            if not results:
+                break
+            for r in results:
+                text = r.get("summary_text") or ""
+                if text:
+                    chunks.append(text)
+                    meta.append({
+                        "topic": r.get("topic") or "",
+                        "session_id": r.get("session_id") or "",
+                    })
+            if len(results) < batch:
+                break
+            offset += batch
+
+        if chunks:
+            build_memory_bm25(user_id, chunks, meta)
+            logger.info(f"[RAG:MEM] BM25 built for user={user_id}: {len(chunks)} summaries")
+    except Exception as e:
+        logger.warning(f"[RAG:MEM] BM25 build failed for user={user_id}: {e}")

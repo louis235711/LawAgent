@@ -4,7 +4,7 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     # DeepSeek
     deepseek_api_key: str = ""
-    deepseek_base_url: str = "https://api.deepseek.com"
+    deepseek_base_url: str = "https://token-plan-cn.xiaomimimo.com/anthropic"
 
     # DashScope
     dashscope_api_key: str = ""
@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     embedding_model: str = "text-embedding-v4"
     rerank_base_url: str = "https://dashscope.aliyuncs.com/api/v1/services"
     rerank_endpoint: str = "/rerank/text-rerank/text-rerank"
-    rerank_model: str = "qwen3-rerank"
+    rerank_model: str = "gte-rerank-v2"
 
     # Tavily
     tavily_api_key: str = ""
@@ -42,6 +42,11 @@ class Settings(BaseSettings):
     milvus_host: str = "localhost"
     milvus_port: int = 19530
 
+    # External MCP Servers (stdio transport — command to start each server)
+    mcp_time_server_cmd: str = ""
+    mcp_calculator_server_cmd: str = ""
+    mcp_fetch_server_cmd: str = ""
+
     # Context window
     max_context_tokens: int = 200_000
     summary_trigger_ratio: float = 0.70
@@ -61,10 +66,21 @@ class Settings(BaseSettings):
     templates_dir: str = "data/templates"
     laws_dir: str = "data/laws"
 
-    # Long-term memory
+    # Auth
+    session_token_ttl: int = 172_800  # 2 days
+
+    # Long-term memory (paths are templates; actual paths include user_id)
     memory_dir: str = "data/memory"
     feedback_style_path: str = "data/memory/feedback_style.md"
     user_role_path: str = "data/memory/user_role.md"
+
+    @staticmethod
+    def memory_paths_for_user(user_id: int) -> tuple[str, str]:
+        """Return (feedback_style_path, user_role_path) for a given user."""
+        import os
+        base = os.path.join("data", "memory", str(user_id))
+        return (os.path.join(base, "feedback_style.md"),
+                os.path.join(base, "user_role.md"))
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 

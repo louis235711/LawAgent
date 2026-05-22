@@ -14,6 +14,7 @@ EMBEDDING_DIM = 1024  # text-embedding-v4
 
 LEGAL_KNOWLEDGE_COLLECTION = "legal_knowledge"
 SESSION_DOCUMENTS_COLLECTION = "session_documents"
+SESSION_MEMORY_COLLECTION = "session_memory"
 
 _INDEX_PARAMS = {
     "metric_type": "COSINE",
@@ -66,12 +67,30 @@ def _create_session_documents():
     _create_index(coll)
 
 
+def _create_session_memory():
+    fields = [
+        FieldSchema(name="id", dtype=DataType.INT64, is_primary=True, auto_id=True),
+        FieldSchema(name="user_id", dtype=DataType.INT64, default_value=0),
+        FieldSchema(name="session_id", dtype=DataType.VARCHAR, max_length=64, default_value=""),
+        FieldSchema(name="summary_text", dtype=DataType.VARCHAR, max_length=65535),
+        FieldSchema(name="topic", dtype=DataType.VARCHAR, max_length=256, default_value=""),
+        FieldSchema(name="turn_range", dtype=DataType.VARCHAR, max_length=64, default_value=""),
+        FieldSchema(name="created_at", dtype=DataType.INT64, default_value=0),
+        FieldSchema(name="vector", dtype=DataType.FLOAT_VECTOR, dim=EMBEDDING_DIM),
+    ]
+    schema = CollectionSchema(fields, description="会话长期记忆（结构化摘要）")
+    coll = Collection(name=SESSION_MEMORY_COLLECTION, schema=schema)
+    _create_index(coll)
+
+
 def init_collections():
     connect()
     if not utility.has_collection(LEGAL_KNOWLEDGE_COLLECTION):
         _create_legal_knowledge()
     if not utility.has_collection(SESSION_DOCUMENTS_COLLECTION):
         _create_session_documents()
+    if not utility.has_collection(SESSION_MEMORY_COLLECTION):
+        _create_session_memory()
 
 
 def get_collection(name: str) -> Collection:
@@ -87,3 +106,7 @@ def get_legal_collection() -> Collection:
 
 def get_session_docs_collection() -> Collection:
     return get_collection(SESSION_DOCUMENTS_COLLECTION)
+
+
+def get_session_memory_collection() -> Collection:
+    return get_collection(SESSION_MEMORY_COLLECTION)

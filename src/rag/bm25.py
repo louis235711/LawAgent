@@ -125,6 +125,24 @@ def remove_session_bm25(session_id: str):
     _session_bm25.pop(session_id, None)
 
 
+# Per-user BM25 indices for session memory (long-term structured summaries)
+_memory_bm25: dict[int, BM25] = {}
+
+
+def get_memory_bm25(user_id: int) -> BM25 | None:
+    return _memory_bm25.get(user_id)
+
+
+def build_memory_bm25(user_id: int, documents: list[str], metadata: list[dict] | None = None):
+    bm25 = BM25()
+    bm25.index(documents, metadata)
+    _memory_bm25[user_id] = bm25
+
+
+def remove_memory_bm25(user_id: int):
+    _memory_bm25.pop(user_id, None)
+
+
 async def ensure_session_bm25(session_id: str) -> BM25 | None:
     """Get or build session BM25, recovering from Milvus if lost (e.g. after restart)."""
     existing = _session_bm25.get(session_id)

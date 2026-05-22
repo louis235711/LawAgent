@@ -54,10 +54,10 @@ LawAgent/
     │   ├── __init__.py
     │   ├── client.py                      # DeepSeek 双 SDK（OpenAI + Anthropic）/ReAct thinking/streaming/重试
     │   ├── embedding.py                   # DashScope text-embedding-v4（1024维）
-    │   └── rerank.py                      # DashScope qwen3-rerank 重排
+    │   └── rerank.py                      # DashScope gte-rerank-v2 重排
     ├── security/
     │   ├── __init__.py
-    │   └── guard.py                       # 合规检测（三分类：合法/无关/违规）
+    │   └── guard.py                       # 合规检测（二分类：合法/违规）
     ├── memory/
     │   ├── __init__.py
     │   └── context_manager.py             # 记忆管理（短期/摘要/200k滑动窗口/双写PG）
@@ -110,7 +110,7 @@ LawAgent/
 4. **记忆按 turn 分组**：每轮 ReAct 轨迹（thinking → tool_use → observation → final_answer）存入 structured memory
 5. **压缩按 turn 优先丢弃 thinking**：压缩时完整 turn 为单位，thinking 最先降级为摘要
 6. **文档切片不存 PostgreSQL**：切片原文直接存入 Milvus 标量字段，检索时一并返回
-7. **安全优先**：所有用户输入先过 security guard（三分类），违规/无关即阻塞
+7. **安全优先**：所有用户输入先过 security guard（二分类），违规即阻塞
 8. **PDF 三级降级解析**：MinerU → pdfminer.six → raw text
 9. **SSE 流式输出**：支持 thinking_delta / tool_call / tool_result / delta 多种事件
 10. **纯静态前端**：HTML+CSS+JS，无构建工具，CDN 引入 marked.js + highlight.js

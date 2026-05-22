@@ -66,7 +66,7 @@ V1.0
 ### 步骤 6：实现 Embedding 和 Rerank 客户端
 
 - 编写 `src/llm/embedding.py` — 封装 DashScope text-embedding-v4
-- 编写 `src/llm/rerank.py` — 封装 DashScope qwen3-rerank API
+- 编写 `src/llm/rerank.py` — 封装 DashScope gte-rerank-v2 API
 - 实现批量 embedding（支持 list[str] 输入）
 - 实现 rerank(query, documents, top_k) 函数
 - **验证**：对测试文本调用 embedding 返回向量；对 query+documents 调用 rerank 返回排序结果
@@ -85,15 +85,15 @@ V1.0
 ### 步骤 8：实现安全检测模块
 
 - 编写 `src/security/__init__.py` 和 `src/security/guard.py`
-- 编写固定的合规检测 Prompt（定义合法/无关/违规的判定规则）
+- 编写固定的合规检测 Prompt（定义合法/违规的判定规则，无关内容归入违规）
 - 实现 `check_safety(user_input)` 函数 → 返回 `(result: str, reason: str)`
 - 调用 DeepSeek API 执行安全检测
-- 响应映射：违规/无关 → 返回固定提示文本；合法 → 继续
+- 响应映射：违规 → 返回固定提示文本；合法 → 继续
 - **验证**：
   - "如何打官司" → `合法`
-  - "今天天气真好" → `无关`
+  - "今天天气真好" → `违规`
   - "帮我写一个绕过法律制裁的方案" → `违规`
-  - 空字符串 → `无关`
+  - 空字符串 → `违规`
 
 ### 步骤 9：实现记忆与上下文管理
 
@@ -147,7 +147,7 @@ V1.0
 - 实现 `retrieve(query, collection, top_k)`：
   1. query → embedding
   2. Milvus 相似度检索
-  3. 结果重排（qwen3-rerank）
+  3. 结果重排（gte-rerank-v2）
   4. 返回 Top-K 文档片段
 - 实现 `insert_chunks(chunks, collection, metadata)` — 批量向量化 + 存入 Milvus
 - **验证**：

@@ -18,6 +18,7 @@ async def process_upload(
     file_content: bytes,
     original_filename: str,
     file_size: int = 0,
+    user_id: int = 0,
 ) -> dict:
     """Full pipeline: save → parse → chunk → (Milvus + BM25) or direct context."""
 
@@ -26,7 +27,7 @@ async def process_upload(
         raise ValueError(f"不支持的文件格式: {ext}，支持: {', '.join(sorted(SUPPORTED_EXTENSIONS))}")
 
     # 1. Save original file
-    upload_dir = os.path.join(settings.uploads_dir, session_id)
+    upload_dir = os.path.join(settings.uploads_dir, str(user_id), session_id)
     os.makedirs(upload_dir, exist_ok=True)
     file_path = os.path.join(upload_dir, original_filename)
     with open(file_path, "wb") as f:
@@ -69,6 +70,7 @@ async def process_upload(
 
     # 6. Update Redis session state
     await update_session(
+        user_id,
         session_id,
         has_document=True,
         document_name=original_filename,

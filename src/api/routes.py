@@ -1,16 +1,17 @@
 import json
 import os
 import uuid
-from fastapi import APIRouter, UploadFile, File, HTTPException
+from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
 from fastapi.responses import StreamingResponse, FileResponse
 from src.api.schemas import (
     ChatRequest, ChatResponse, SessionResponse,
     UploadResponse, HistoryMessage, HealthResponse,
 )
 from src.agents.base import AgentResponse
-from src.database.redis import create_session, get_session, delete_session
+from src.database.redis import create_session, get_session, delete_session, update_session
 from src.database.message_repo import get_messages
 from src.security.guard import check_safety, get_block_response
+from src.security.auth import get_current_user
 from src.agents.dispatcher import DispatcherAgent
 from src.document.processor import process_upload
 from loguru import logger
@@ -51,17 +52,19 @@ async def health_check():
 
 
 @router.post("/session", response_model=SessionResponse)
-async def new_session():
+async def new_session(current_user: dict = Depends(get_current_user)):
+    user_id = current_user["user_id"]
     session_id = uuid.uuid4().hex[:16]
-    await create_session(session_id)
+    await create_session(user_id, session_id)
     return SessionResponse(session_id=session_id)
 
 
 @router.post("/chat/{session_id}", response_model=ChatResponse)
-async def chat(session_id: str, req: ChatRequest):
+async def chat(session_id: str, req: ChatRequest, current_user: dict = Depends(get_current_user)):
+    user_id = current_user["user_id"]
     user_input = req.message
     logger.info(f"[SECURITY] checking: {user_input[:80]}...")
-    logger.info(f"[ROUTE] session={session_id} input_len={len(user_input)}")
+    logger.info(f"[ROUTE] user={user_id} session={session_id} input_len={len(user_input)}")
 
     # Security check
     try:
@@ -82,7 +85,7 @@ async def chat(session_id: str, req: ChatRequest):
 
     # Dispatch to agents
     try:
-        response = await dispatcher.dispatch(session_id, user_input)
+        response = await dispatcher.dispatch(user_id, session_id, user_input)
     except Exception as e:
         logger.error(f"Dispatch error: {e}")
         raise HTTPException(status_code=500, detail="处理请求时出现内部错误")
@@ -101,10 +104,11 @@ async def chat(session_id: str, req: ChatRequest):
 
 
 @router.post("/chat/{session_id}/stream")
-async def chat_stream(session_id: str, req: ChatRequest):
+async def chat_stream(session_id: str, req: ChatRequest, current_user: dict = Depends(get_current_user)):
+    user_id = current_user["user_id"]
     user_input = req.message
     logger.info(f"[SECURITY] checking: {user_input[:80]}...")
-    logger.info(f"[ROUTE] session={session_id} input_len={len(user_input)} stream=true")
+    logger.info(f"[ROUTE] user={user_id} session={session_id} input_len={len(user_input)} stream=true")
 
     # Security check
     try:
@@ -133,7 +137,7 @@ async def chat_stream(session_id: str, req: ChatRequest):
 
     async def generate():
         try:
-            async for item in dispatcher.dispatch_stream(session_id, user_input):
+            async for item in dispatcher.dispatch_stream(user_id, session_id, user_input):
                 if isinstance(item, AgentResponse):
                     done_data = json.dumps({
                         "done": True,
@@ -144,7 +148,6 @@ async def chat_stream(session_id: str, req: ChatRequest):
                     }, ensure_ascii=False)
                     yield f"data: {done_data}\n\n"
                 elif isinstance(item, dict):
-                    # status event (e.g. "summarizing") or refs event
                     yield f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
                 else:
                     chunk_data = json.dumps({"delta": item}, ensure_ascii=False)
@@ -164,7 +167,8 @@ SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".xlsx", ".png", ".jpg", ".jpeg", ".md"
 
 
 @router.post("/upload/{session_id}", response_model=UploadResponse)
-async def upload_file(session_id: str, file: UploadFile = File(...)):
+async def upload_file(session_id: str, file: UploadFile = File(...), current_user: dict = Depends(get_current_user)):
+    user_id = current_user["user_id"]
     if not file.filename:
         raise HTTPException(status_code=400, detail="未提供文件")
 
@@ -182,7 +186,7 @@ async def upload_file(session_id: str, file: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail="文件大小不能超过 1MB，请压缩后重试")
 
     try:
-        result = await process_upload(session_id, content, file.filename, file_size)
+        result = await process_upload(session_id, content, file.filename, file_size, user_id=user_id)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except RuntimeError as e:
@@ -196,29 +200,39 @@ async def upload_file(session_id: str, file: UploadFile = File(...)):
 
 @router.get("/download/{session_id}/{filename}")
 async def download_file(session_id: str, filename: str):
-    """Download a generated document file."""
+    """Download a generated document file. Auth is optional (direct link click)."""
+    import glob as _glob
     from src.config import settings
-    # Check generated_dir first, then uploads_dir
+    # Search all user-scoped paths, then legacy
     for base in [settings.generated_dir, settings.uploads_dir]:
-        file_path = os.path.join(base, session_id, filename)
-        if os.path.isfile(file_path):
-            return FileResponse(file_path, filename=filename, media_type="application/octet-stream")
+        # Try user-scoped paths first (any user_id directory)
+        for user_dir in _glob.glob(os.path.join(base, "*")):
+            if not os.path.isdir(user_dir):
+                continue
+            file_path = os.path.join(user_dir, session_id, filename)
+            if os.path.isfile(file_path):
+                return FileResponse(file_path, filename=filename, media_type="application/octet-stream")
+        # Fallback: legacy path
+        legacy_path = os.path.join(base, session_id, filename)
+        if os.path.isfile(legacy_path):
+            return FileResponse(legacy_path, filename=filename, media_type="application/octet-stream")
     raise HTTPException(status_code=404, detail="文件不存在或已过期")
 
 
 @router.delete("/session/{session_id}/document")
-async def remove_session_document(session_id: str):
+async def remove_session_document(session_id: str, current_user: dict = Depends(get_current_user)):
     """Mark session document as removed (does not delete files/vectors)."""
-    from src.database.redis import update_session
+    user_id = current_user["user_id"]
     from src.rag.bm25 import remove_session_bm25
-    await update_session(session_id, has_document=False, document_name="", file_size=0)
+    await update_session(user_id, session_id, has_document=False, document_name="", file_size=0)
     remove_session_bm25(session_id)
     return {"status": "removed", "session_id": session_id}
 
 
 @router.get("/session/{session_id}/history")
-async def session_history(session_id: str):
-    session = await get_session(session_id)
+async def session_history(session_id: str, current_user: dict = Depends(get_current_user)):
+    user_id = current_user["user_id"]
+    session = await get_session(user_id, session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="会话不存在")
 
@@ -238,7 +252,6 @@ async def session_history(session_id: str):
             "thinking": meta.get("thinking", ""),
             "tools": meta.get("tools_used", []),
         }
-        # Convert tools_used list to frontend-friendly format
         if isinstance(msg["tools"], list):
             msg["tools"] = [{"name": t, "completed": True, "summary": ""} for t in msg["tools"] if isinstance(t, str)]
         msgs_out.append(msg)
@@ -255,7 +268,8 @@ async def session_history(session_id: str):
 
 
 @router.delete("/session/{session_id}")
-async def remove_session(session_id: str):
+async def remove_session(session_id: str, current_user: dict = Depends(get_current_user)):
+    user_id = current_user["user_id"]
     # Extract long-term memory from conversation before deletion
     try:
         pg_msgs = get_messages(session_id, limit=100)
@@ -265,11 +279,11 @@ async def remove_session(session_id: str):
                 role = "用户" if m["role"] == "user" else "AI"
                 lines.append(f"{role}: {m['content']}")
             from src.memory.long_term import schedule_memory_update
-            schedule_memory_update("\n".join(lines))
+            schedule_memory_update("\n".join(lines), user_id)
     except Exception:
         pass
 
-    await delete_session(session_id)
+    await delete_session(user_id, session_id)
     try:
         from src.database.postgres import get_conn, put_conn
         conn = get_conn()
@@ -294,11 +308,13 @@ async def remove_session(session_id: str):
     except Exception:
         pass
 
-    # Clean up uploaded files on disk
+    # Clean up uploaded and generated files on disk (user-scoped + legacy)
     import shutil
     from src.config import settings
-    upload_dir = os.path.join(settings.uploads_dir, session_id)
-    if os.path.isdir(upload_dir):
-        shutil.rmtree(upload_dir)
+    for base_dir in (settings.uploads_dir, settings.generated_dir):
+        for scope in (os.path.join(base_dir, str(user_id)), base_dir):
+            target_dir = os.path.join(scope, session_id)
+            if os.path.isdir(target_dir):
+                shutil.rmtree(target_dir, ignore_errors=True)
 
     return {"status": "deleted", "session_id": session_id}

@@ -121,6 +121,25 @@ TOOLS = [
             "required": ["expression"],
         },
     },
+    {
+        "name": "search_memory",
+        "description": "检索用户的长期记忆（跨会话的历史对话摘要）。调用时机：用户提到之前讨论过的内容、需要回顾历史对话结论、或当前问题需要参考过去的咨询记录时。仅返回7天内的记忆。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "记忆检索查询，如'之前讨论的借款合同''上次咨询的劳动纠纷结论'",
+                },
+                "top_k": {
+                    "type": "integer",
+                    "description": "返回结果数量，默认5条",
+                    "default": 5,
+                },
+            },
+            "required": ["query"],
+        },
+    },
 ]
 
 # ── PDF HTML template (xhtml2pdf-compatible legal styling) ───
@@ -224,7 +243,7 @@ async def execute_search_documents(query: str, session_id: str, top_k: int = 5, 
     return "\n\n---\n\n".join(lines)
 
 
-async def execute_read_document_full(session_id: str) -> str:
+async def execute_read_document_full(session_id: str, user_id: int = 0) -> str:
     """Read full document text for a session. Falls back to JSON chunks if not in Milvus."""
     try:
         from src.vector_db.milvus_client import get_collection, SESSION_DOCUMENTS_COLLECTION
@@ -268,24 +287,34 @@ async def execute_read_document_full(session_id: str) -> str:
                 parts.append(f"【第{idx+1}段】{text}")
             return "\n\n---\n\n".join(parts)
 
-        # Fallback: load from JSON
+        # Fallback: load from JSON (check user-scoped first, then legacy)
         import glob
-        pattern = os.path.join(settings.uploads_dir, session_id, "*_chunks.json")
-        json_files = glob.glob(pattern)
-        if json_files:
-            with open(json_files[0], "r", encoding="utf-8") as f:
-                chunks = json.load(f)
-            total = len(chunks)
-            if total > 50:
-                return f"文档共 {total} 段（前50段）:\n\n" + "\n\n---\n\n".join(chunks[:50])
-            return "\n\n---\n\n".join(chunks)
 
-        # Try raw text file
-        txt_pattern = os.path.join(settings.uploads_dir, session_id, "*.txt")
-        txt_files = glob.glob(txt_pattern)
-        if txt_files:
-            with open(txt_files[0], "r", encoding="utf-8") as f:
-                return f.read()
+        def _find_session_dir(base_dir: str) -> str | None:
+            if user_id:
+                user_dir = os.path.join(base_dir, str(user_id), session_id)
+                if os.path.isdir(user_dir):
+                    return user_dir
+            legacy_dir = os.path.join(base_dir, session_id)
+            if os.path.isdir(legacy_dir):
+                return legacy_dir
+            return None
+
+        session_dir = _find_session_dir(settings.uploads_dir)
+        if session_dir:
+            json_files = glob.glob(os.path.join(session_dir, "*_chunks.json"))
+            if json_files:
+                with open(json_files[0], "r", encoding="utf-8") as f:
+                    chunks = json.load(f)
+                total = len(chunks)
+                if total > 50:
+                    return f"文档共 {total} 段（前50段）:\n\n" + "\n\n---\n\n".join(chunks[:50])
+                return "\n\n---\n\n".join(chunks)
+
+            txt_files = glob.glob(os.path.join(session_dir, "*.txt"))
+            if txt_files:
+                with open(txt_files[0], "r", encoding="utf-8") as f:
+                    return f.read()
 
         return "文档未找到，可能已过期或未正确上传。"
     except Exception as e:
@@ -339,7 +368,7 @@ def _add_formatted_paragraph(doc, text: str):
         para.add_run(plain)
 
 
-async def execute_generate_document(requirements: str, format: str, session_id: str) -> str:
+async def execute_generate_document(requirements: str, format: str, session_id: str, user_id: int = 0) -> str:
     """Generate a legal document. Returns markdown content + download info."""
     from src.llm.client import chat_completion
 
@@ -380,7 +409,7 @@ async def execute_generate_document(requirements: str, format: str, session_id: 
         format = "md"
 
     filename = f"{title}.{format}"
-    output_dir = os.path.join(settings.generated_dir, session_id)
+    output_dir = os.path.join(settings.generated_dir, str(user_id), session_id) if user_id else os.path.join(settings.generated_dir, session_id)
     os.makedirs(output_dir, exist_ok=True)
     output_path = os.path.join(output_dir, filename)
 
@@ -502,10 +531,38 @@ async def execute_calculate(expression: str) -> str:
         return f"计算失败：{e}。请检查表达式格式是否正确。"
 
 
+async def execute_search_memory(query: str, user_id: int, top_k: int = 5) -> str:
+    """Search user's long-term memory (structured summaries from past sessions)."""
+    from src.rag.pipeline import retrieve_session_memory
+    try:
+        results = await retrieve_session_memory(query=query, user_id=user_id, top_k=top_k)
+    except Exception as e:
+        logger.warning(f"search_memory failed: {e}")
+        return f"记忆检索失败: {e}"
+
+    if not results:
+        return "未找到相关历史记忆。可能已超过7天有效期或尚未积累足够记忆。"
+
+    lines = []
+    for i, r in enumerate(results, 1):
+        topic = r.get("topic", "")
+        header = f"### 记忆{i}"
+        if topic:
+            header += f"（{topic}）"
+        lines.append(f"{header}\n{r['chunk_text']}")
+
+    return "\n\n".join(lines)
+
+
 # ── Tool executor router ─────────────────────────────────────
 
-async def execute_tool(name: str, input_: dict, session_id: str) -> str:
+async def execute_tool(name: str, input_: dict, session_id: str, user_id: int = 0) -> str:
     """Route tool name to executor. Returns serialized result string."""
+    # External MCP tools (prefixed with mcp_)
+    if name.startswith("mcp_"):
+        from src.mcp.client import get_mcp_client
+        return await get_mcp_client().call_tool(name, input_)
+
     try:
         if name == "search_laws":
             return await execute_search_laws(
@@ -524,18 +581,25 @@ async def execute_tool(name: str, input_: dict, session_id: str) -> str:
                 top_k=input_.get("top_k", 5),
             )
         elif name == "read_document_full":
-            return await execute_read_document_full(session_id)
+            return await execute_read_document_full(session_id, user_id=user_id)
         elif name == "generate_document":
             return await execute_generate_document(
                 requirements=input_.get("requirements", ""),
                 format=input_.get("format", "md"),
                 session_id=session_id,
+                user_id=user_id,
             )
         elif name == "get_current_time":
             return await execute_get_current_time()
         elif name == "calculate":
             return await execute_calculate(
                 expression=input_.get("expression", ""),
+            )
+        elif name == "search_memory":
+            return await execute_search_memory(
+                query=input_.get("query", ""),
+                user_id=user_id,
+                top_k=input_.get("top_k", 5),
             )
         else:
             return f"未知工具: {name}"

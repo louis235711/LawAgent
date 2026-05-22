@@ -1,4 +1,5 @@
 import asyncio
+import json
 import httpx
 from src.config import settings
 from loguru import logger
@@ -34,11 +35,15 @@ async def rerank(
                 response = await client.post(url, headers=headers, json=payload)
                 response.raise_for_status()
                 data = response.json()
+                logger.debug(f"[RERANK] raw response: {json.dumps(data, ensure_ascii=False)}"[:2000])
                 results = data.get("output", {}).get("results", [])
 
                 sorted_results = sorted(results, key=lambda x: x["relevance_score"], reverse=True)
                 if top_k:
-                    sorted_results = sorted_results[:top_k]
+                    sorted_results = sorted_results[:int(top_k)]
+                # Normalize index to int (gte-rerank-v2 may return float or str)
+                for r in sorted_results:
+                    r["index"] = int(r["index"])
                 return sorted_results
             except httpx.HTTPError as e:
                 logger.warning(f"Rerank attempt {attempt + 1} failed: {e}")

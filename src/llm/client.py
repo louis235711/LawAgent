@@ -1,43 +1,49 @@
 import asyncio
-from openai import AsyncOpenAI, OpenAIError
-from anthropic import AsyncAnthropic
+from anthropic import AsyncAnthropic, APIError
 from src.config import settings
 from loguru import logger
 
-_client: AsyncOpenAI | None = None
-_anthropic_client: AsyncAnthropic | None = None
+_client: AsyncAnthropic | None = None
 
 
-def get_client() -> AsyncOpenAI:
+def get_client() -> AsyncAnthropic:
     global _client
     if _client is None:
-        _client = AsyncOpenAI(
+        _client = AsyncAnthropic(
             api_key=settings.deepseek_api_key,
             base_url=settings.deepseek_base_url,
         )
     return _client
 
 
-def get_anthropic_client() -> AsyncAnthropic:
-    global _anthropic_client
-    if _anthropic_client is None:
-        _anthropic_client = AsyncAnthropic(
-            api_key=settings.deepseek_api_key,
-            base_url="https://api.deepseek.com/anthropic",
-        )
-    return _anthropic_client
+def _extract_system(messages: list[dict]) -> tuple[str, list[dict]]:
+    """Extract system messages from the list, return (system_text, remaining_messages)."""
+    system_parts = []
+    remaining = []
+    for m in messages:
+        if m["role"] == "system":
+            system_parts.append(m["content"])
+        else:
+            remaining.append(m)
+    return "\n\n".join(system_parts), remaining
 
 
-def _normalize_role(role: str) -> str:
-    """Convert internal role names to OpenAI API format."""
-    if role == "ai":
-        return "assistant"
-    return role
+def _normalize_messages(messages: list[dict]) -> list[dict]:
+    """Convert internal role names to Anthropic format. Only user/assistant allowed."""
+    result = []
+    for m in messages:
+        role = m["role"]
+        if role == "ai":
+            role = "assistant"
+        elif role == "system":
+            continue  # system extracted separately
+        result.append({"role": role, "content": m["content"]})
+    return result
 
 
 async def chat_completion(
     messages: list[dict],
-    model: str = "deepseek-v4-flash",
+    model: str = "mimo-v2.5-pro",
     temperature: float = 0.7,
     max_tokens: int = 4096,
     stream: bool = False,
@@ -45,43 +51,27 @@ async def chat_completion(
     **kwargs,
 ) -> str:
     client = get_client()
-    # Normalize roles for API compatibility
-    normalized = [
-        {"role": _normalize_role(m["role"]), "content": m["content"]}
-        for m in messages
-    ]
+    system_text, remaining = _extract_system(messages)
+    normalized = _normalize_messages(remaining)
     last_error = None
 
     for attempt in range(max_retries):
         try:
-            if stream:
-                chunks = []
-                response = await client.chat.completions.create(
-                    model=model,
-                    messages=normalized,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    stream=True,
-                    **kwargs,
-                )
-                async for chunk in response:
-                    if chunk.choices[0].delta.content:
-                        chunks.append(chunk.choices[0].delta.content)
-                return "".join(chunks)
-            else:
-                response = await client.chat.completions.create(
-                    model=model,
-                    messages=normalized,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    stream=False,
-                    **kwargs,
-                )
-                content = response.choices[0].message.content
-                if not content:
-                    logger.warning(f"LLM returned empty content (model={model}, finish_reason={response.choices[0].finish_reason})")
-                return content
-        except OpenAIError as e:
+            response = await client.messages.create(
+                model=model,
+                messages=normalized,
+                system=system_text or None,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                **kwargs,
+            )
+            text_blocks = [b.text for b in response.content if b.type == "text"]
+            content = "\n".join(text_blocks)
+            if not content:
+                logger.warning(f"LLM returned empty content (model={model}, "
+                               f"stop_reason={response.stop_reason})")
+            return content
+        except APIError as e:
             last_error = e
             logger.warning(f"LLM call attempt {attempt + 1} failed: {e}")
             if attempt < max_retries - 1:
@@ -97,7 +87,7 @@ async def chat_completion(
 
 async def chat_completion_stream(
     messages: list[dict],
-    model: str = "deepseek-v4-flash",
+    model: str = "mimo-v2.5-pro",
     temperature: float = 0.7,
     max_tokens: int = 4096,
     max_retries: int = 3,
@@ -105,27 +95,25 @@ async def chat_completion_stream(
 ):
     """Yield text chunks as they arrive from the LLM. Use for SSE streaming."""
     client = get_client()
-    normalized = [
-        {"role": _normalize_role(m["role"]), "content": m["content"]}
-        for m in messages
-    ]
+    system_text, remaining = _extract_system(messages)
+    normalized = _normalize_messages(remaining)
     last_error = None
 
     for attempt in range(max_retries):
         try:
-            response = await client.chat.completions.create(
+            async with client.messages.stream(
                 model=model,
                 messages=normalized,
+                system=system_text or None,
                 temperature=temperature,
                 max_tokens=max_tokens,
-                stream=True,
                 **kwargs,
-            )
-            async for chunk in response:
-                if chunk.choices[0].delta.content:
-                    yield chunk.choices[0].delta.content
-            return
-        except OpenAIError as e:
+            ) as stream:
+                async for event in stream:
+                    if event.type == "content_block_delta" and event.delta.type == "text_delta":
+                        yield event.delta.text
+                return
+        except APIError as e:
             last_error = e
             logger.warning(f"LLM stream attempt {attempt + 1} failed: {e}")
             if attempt < max_retries - 1:
@@ -147,7 +135,7 @@ async def chat_completion_react(
     messages: list[dict],
     system: str,
     tools: list[dict],
-    model: str = "deepseek-v4-flash",
+    model: str = "mimo-v2.5-pro",
     max_tokens: int = 4096,
     thinking_budget: int = 2048,
     max_retries: int = 3,
@@ -161,7 +149,7 @@ async def chat_completion_react(
     Returns the raw Anthropic Message object with content blocks
     (thinking, tool_use, text, etc.)
     """
-    client = get_anthropic_client()
+    client = get_client()
     last_error = None
 
     for attempt in range(max_retries):
@@ -188,7 +176,7 @@ async def chat_completion_react_stream(
     messages: list[dict],
     system: str,
     tools: list[dict],
-    model: str = "deepseek-v4-flash",
+    model: str = "mimo-v2.5-pro",
     max_tokens: int = 4096,
     thinking_budget: int = 2048,
     max_retries: int = 3,
@@ -204,7 +192,7 @@ async def chat_completion_react_stream(
     Also yields final message object as last non-done event for
     callers that need the full content_blocks for memory storage.
     """
-    client = get_anthropic_client()
+    client = get_client()
     last_error = None
 
     for attempt in range(max_retries):

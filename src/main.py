@@ -10,7 +10,9 @@ from loguru import logger
 from src.config import settings
 from src.database.postgres import init_db
 from src.vector_db.milvus_client import init_collections
-from src.api.routes import router
+from src.api.routes import router as chat_router
+from src.api.auth import router as auth_router
+from src.mcp.server import mcp_server
 
 
 # ── Logging setup ──────────────────────────────────────────
@@ -51,9 +53,25 @@ async def lifespan(app: FastAPI):
     from src.rag.pipeline import build_bm25_from_collection
     n = await build_bm25_from_collection()
     logger.info(f"BM25 index built: {n} documents")
+
+    # Connect to external MCP servers
+    from src.mcp.client import get_mcp_client
+    mcp_client = get_mcp_client()
+    await mcp_client.connect_all()
+    ext_tools = mcp_client.list_external_tools()
+    if ext_tools:
+        logger.info(f"External MCP tools: {len(ext_tools)} — {[t['name'] for t in ext_tools]}")
+
+    # Start background idle session scanner
+    from src.memory.scheduler import start_scheduler, stop_scheduler
+    start_scheduler()
+
     logger.info(f"LawAgent ready on {settings.app_host}:{settings.app_port}")
     yield
+
     logger.info("LawAgent shutting down")
+    stop_scheduler()
+    await mcp_client.disconnect_all()
 
 
 app = FastAPI(
@@ -87,7 +105,12 @@ async def request_context(request: Request, call_next):
         return response
 
 
-app.include_router(router)
+app.include_router(chat_router)
+app.include_router(auth_router)
+
+# MCP Server — expose tools to external MCP clients
+mcp_app = mcp_server.sse_app(mount_path="/messages")
+app.mount("/mcp", mcp_app)
 
 # Static files — serve frontend
 static_dir = os.path.join(os.path.dirname(__file__), "..", "static")
